@@ -75,7 +75,7 @@ export default function VoicemailTab() {
           resizeMode="contain"
         />
         <Text className="text-2xl font-bold text-fern_green mt-4">
-          Voicemail Manager
+          HiggsCeptionist
         </Text>
       </View>
     );
@@ -83,7 +83,7 @@ export default function VoicemailTab() {
 
   const renderItem = ({ item }: { item: Voicemail }) => (
     <TouchableOpacity
-      className="flex-row bg-white p-4 mx-2 my-1 rounded-lg items-center"
+      className="flex-row bg-white p-4 mx-2 my-1 rounded-lg items-center relative"
       onPress={() => {
         if (Platform.OS === "web") {
           alert(`Playing voicemail from ${item.name}`);
@@ -92,6 +92,9 @@ export default function VoicemailTab() {
         }
       }}
     >
+      {item.unread && (
+        <View className="absolute top-2 left-2 w-3 h-3 bg-blue-500 rounded-full" />
+      )}
       <View className="flex-1 flex-row items-center">
         <View className="flex-[2]">
           <Text className="font-bold text-lg">{item.number}</Text>
@@ -119,17 +122,16 @@ export default function VoicemailTab() {
   );
 
   return (
-    <ScrollView
-      className="flex-1 bg-gray-100"
-      showsVerticalScrollIndicator={false}
+    <View
+      className="flex-1 bg-gray-100 dark:bg-black"
     >
       <TextInput
-        className="bg-white p-3 m-2 rounded-lg text-base"
+        className="bg-white p-3 mt-10 m-3 rounded-lg text-base"
         placeholder="Search voicemails..."
         value={search}
         onChangeText={handleSearch}
       />
-      <View className="flex-row justify-around mb-2">
+      <View className="flex-row justify-around m-3">
         <TouchableOpacity
           className={`mx-1 flex-1 rounded-lg py-3 items-center ${
             filterUnread ? "bg-fern_green" : "bg-charcoal"
@@ -154,6 +156,6 @@ export default function VoicemailTab() {
         keyExtractor={(item) => item.id}
         contentContainerStyle={{ paddingBottom: 20 }}
       />
-    </ScrollView>
+    </View>
   );
 }
