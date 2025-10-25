@@ -1,0 +1,125 @@
+import "../global.css";
+
+import { useState, useEffect } from "react";
+import {
+  View,
+  Text,
+  TextInput,
+  FlatList,
+  TouchableOpacity,
+  ScrollView,
+  Alert,
+  Platform,
+} from "react-native";
+import { voicemails } from "./voicemails";
+
+export type Voicemail = {
+  id: string;
+  number: string;
+  name: string;
+  description: string;
+  spam: boolean;
+  date: Date;
+  unread: boolean;
+};
+
+export default function VoicemailTab() {
+  const [search, setSearch] = useState("");
+  const [filtered, setFiltered] = useState<Voicemail[]>(voicemails);
+  const [filterSpam, setFilterSpam] = useState(true);
+  const [filterUnread, setFilterUnread] = useState(true);
+
+
+  const handleSearch = (text: string) => {
+    setSearch(text);
+  };
+
+  useEffect(() => { 
+    const newData = voicemails.filter((vm: Voicemail) => {
+      if (filterSpam && vm.spam) return false;
+      if (filterUnread && !vm.unread) return false;
+      return (
+        vm.name.toLowerCase().includes(search.toLowerCase()) ||
+        vm.number.includes(search) ||
+        vm.description.toLowerCase().includes(search.toLowerCase())
+      );
+    });
+    setFiltered(newData);
+  }, [filterSpam, filterUnread, search]);
+
+  const renderItem = ({ item }: { item: Voicemail }) => (
+    <TouchableOpacity
+      className="flex-row bg-white p-4 mx-2 my-1 rounded-lg items-center"
+      onPress={() => {
+        if (Platform.OS === "web") {
+          alert(`Playing voicemail from ${item.name}`);
+        } else {
+          Alert.alert("Play Voicemail", `Playing voicemail from ${item.name}`);
+        }
+      }}
+    >
+      <View className="flex-1 flex-row items-center">
+        <View className="flex-[2]">
+          <Text className="font-bold text-lg">{item.number}</Text>
+          <Text className="text-gray-500">{item.name}</Text>
+          <Text className="mt-1">{item.description}</Text>
+        </View>
+
+        <View className="flex-[1] items-end">
+          <Text className="font-bold text-md">
+            {item.date.toLocaleDateString(undefined, {
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+            })}
+          </Text>
+          <Text className="text-gray-400 text-sm">
+            {item.date.toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </Text>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+
+  return (
+    <ScrollView
+      className="flex-1 bg-gray-100"
+      showsVerticalScrollIndicator={false}
+    >
+      <TextInput
+        className="bg-white p-3 m-2 rounded-lg text-base"
+        placeholder="Search voicemails..."
+        value={search}
+        onChangeText={handleSearch}
+      />
+      <View className="flex-row justify-around mb-2">
+        <TouchableOpacity
+          className={`mx-1 flex-1 rounded-lg py-3 items-center ${
+            filterUnread ? "bg-blue-500" : "bg-black"
+          }`}
+          onPress={() => setFilterUnread(!filterUnread)}
+        >
+          <Text className="text-white font-semibold">Unread</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          className={`mx-1 flex-1 rounded-lg py-3 items-center ${
+            filterSpam ? "bg-blue-500" : "bg-black"
+          }`}
+          onPress={() => setFilterSpam(!filterSpam)}
+        >
+          <Text className="text-white font-semibold">No Spam</Text>
+        </TouchableOpacity>
+      </View>
+
+      <FlatList
+        data={[...filtered].sort((a, b) => b.date.getTime() - a.date.getTime())}
+        renderItem={renderItem}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={{ paddingBottom: 20 }}
+      />
+    </ScrollView>
+  );
+}
