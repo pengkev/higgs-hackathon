@@ -10,6 +10,7 @@ import {
   ScrollView,
   Alert,
   Platform,
+  Image,
 } from "react-native";
 import { voicemails } from "./voicemails";
 
@@ -28,6 +29,15 @@ export default function VoicemailTab() {
   const [filtered, setFiltered] = useState<Voicemail[]>(voicemails);
   const [filterSpam, setFilterSpam] = useState(false);
   const [filterUnread, setFilterUnread] = useState(true);
+  const [showSplash, setShowSplash] = useState(true);
+
+  useEffect(() => {
+    // Hide splash screen after 2 seconds
+    const timer = setTimeout(() => {
+      setShowSplash(false);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, []);
 
   const handleSearch = (text: string) => {
     setSearch(text);
@@ -54,6 +64,22 @@ export default function VoicemailTab() {
     });
     setFiltered(newData);
   }, [filterSpam, filterUnread, search]);
+
+  // Splash Screen
+  if (showSplash) {
+    return (
+      <View className="flex-1 bg-white items-center justify-center">
+        <Image
+          source={require("../assets/images/splash-icon.png")}
+          className="w-48 h-48"
+          resizeMode="contain"
+        />
+        <Text className="text-2xl font-bold text-fern_green mt-4">
+          Voicemail Manager
+        </Text>
+      </View>
+    );
+  }
 
   const renderItem = ({ item }: { item: Voicemail }) => (
     <TouchableOpacity
@@ -106,7 +132,7 @@ export default function VoicemailTab() {
       <View className="flex-row justify-around mb-2">
         <TouchableOpacity
           className={`mx-1 flex-1 rounded-lg py-3 items-center ${
-            filterUnread ? "bg-blue-500" : "bg-black"
+            filterUnread ? "bg-fern_green" : "bg-charcoal"
           }`}
           onPress={() => setFilterUnread(!filterUnread)}
         >
@@ -114,7 +140,7 @@ export default function VoicemailTab() {
         </TouchableOpacity>
         <TouchableOpacity
           className={`mx-1 flex-1 rounded-lg py-3 items-center ${
-            filterSpam ? "bg-blue-500" : "bg-black"
+            filterSpam ? "bg-mantis" : "bg-charcoal"
           }`}
           onPress={() => setFilterSpam(!filterSpam)}
         >
