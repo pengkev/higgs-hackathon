@@ -26,23 +26,31 @@ export type Voicemail = {
 export default function VoicemailTab() {
   const [search, setSearch] = useState("");
   const [filtered, setFiltered] = useState<Voicemail[]>(voicemails);
-  const [filterSpam, setFilterSpam] = useState(true);
+  const [filterSpam, setFilterSpam] = useState(false);
   const [filterUnread, setFilterUnread] = useState(true);
-
 
   const handleSearch = (text: string) => {
     setSearch(text);
   };
 
-  useEffect(() => { 
+  useEffect(() => {
     const newData = voicemails.filter((vm: Voicemail) => {
-      if (filterSpam && vm.spam) return false;
       if (filterUnread && !vm.unread) return false;
-      return (
-        vm.name.toLowerCase().includes(search.toLowerCase()) ||
-        vm.number.includes(search) ||
-        vm.description.toLowerCase().includes(search.toLowerCase())
-      );
+      if (filterSpam) {
+        return (
+          (vm.name.toLowerCase().includes(search.toLowerCase()) ||
+            vm.number.includes(search) ||
+            vm.description.toLowerCase().includes(search.toLowerCase())) &&
+          vm.spam
+        );
+      } else {
+        return (
+          (vm.name.toLowerCase().includes(search.toLowerCase()) ||
+            vm.number.includes(search) ||
+            vm.description.toLowerCase().includes(search.toLowerCase())) &&
+          !vm.spam
+        );
+      }
     });
     setFiltered(newData);
   }, [filterSpam, filterUnread, search]);
@@ -110,7 +118,7 @@ export default function VoicemailTab() {
           }`}
           onPress={() => setFilterSpam(!filterSpam)}
         >
-          <Text className="text-white font-semibold">No Spam</Text>
+          <Text className="text-white font-semibold">Spam</Text>
         </TouchableOpacity>
       </View>
 
