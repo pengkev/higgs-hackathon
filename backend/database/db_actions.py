@@ -120,7 +120,8 @@ def get_recording(sqlite_url, voicemail_id: int) -> bytes | None:
         )
         row = cursor.fetchone()
         if row:
-            bytes_to_wav(row[0], f'{voicemail_id}.wav', 1, 2, 8000) 
+            return row[0]
+            #bytes_to_wav(row[0], f'../output_recordings/{voicemail_id}.wav', 1, 2, 8000) 
     finally:
         conn.close()
 

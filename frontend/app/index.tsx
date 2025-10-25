@@ -21,6 +21,7 @@ export type Voicemail = {
   spam: boolean;
   date: Date;
   unread: boolean;
+  recording: string | null;
 };
 
 export default function VoicemailTab() {
@@ -98,7 +99,7 @@ export default function VoicemailTab() {
       showsVerticalScrollIndicator={false}
     >
       <TextInput
-        className="bg-white p-3 m-2 rounded-lg text-base"
+        className="bg-white p-5 border-black m-2 rounded-lg text-base"
         placeholder="Search voicemails..."
         value={search}
         onChangeText={handleSearch}
