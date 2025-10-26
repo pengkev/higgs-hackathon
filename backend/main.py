@@ -20,25 +20,128 @@ KEVIN_PHONE_NUMBER = os.getenv("PERSONAL_PHONE")  # Set in .env file
 # VAD configuration
 VAD_MODE = 2           # 0-3, 3=most aggressive
 FRAME_MS = 20          # must be 10/20/30 ms
-END_SIL_MS = 1200      # silence threshold to end utterance (increased from 800ms)
-MAX_UTT_MS = 10000     # max utterance length
-MIN_SPEECH_MS = 500    # minimum speech duration to count as valid utterance (ignore breath/noise)
+END_SIL_MS = 2000      # silence threshold to end utterance (increased to 2 seconds for natural pauses)
+MAX_UTT_MS = 15000     # max utterance length (increased to 15 seconds)
+MIN_SPEECH_MS = 800    # minimum speech duration to count as valid utterance (increased from 500ms)
 
 # Create recordings directory if it doesn't exist
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 app = FastAPI()
 
-# Initialize BosonAI client (optional - set BOSONAI_API_KEY env var to enable)
-boson_client = None
-if os.getenv("BOSONAI_API_KEY"):
-    boson_client = openai.Client(
-        api_key=os.getenv("BOSONAI_API_KEY"),
-        base_url="https://hackathon.boson.ai/v1"
-    )
-
 def log(msg, *args):
     print(f"Media WS: {msg}", *args)
+
+# Initialize BosonAI clients with multiple API keys for cycling
+boson_clients = []
+boson_api_keys = []
+
+# Load all available API keys (BOSONAI_API_KEY1, BOSONAI_API_KEY2, BOSONAI_API_KEY3)
+for i in range(1, 6):
+    api_key = os.getenv(f"BOSONAI_API_KEY{i}")
+    if api_key:
+        boson_api_keys.append(api_key)
+        boson_clients.append(openai.Client(
+            api_key=api_key,
+            base_url="https://hackathon.boson.ai/v1"
+        ))
+        log(f"Loaded BosonAI API key #{i}")
+
+# Fallback to single BOSONAI_API_KEY if numbered keys not found
+if not boson_clients and os.getenv("BOSONAI_API_KEY"):
+    boson_api_keys.append(os.getenv("BOSONAI_API_KEY"))
+    boson_clients.append(openai.Client(
+        api_key=os.getenv("BOSONAI_API_KEY"),
+        base_url="https://hackathon.boson.ai/v1"
+    ))
+    log("Loaded BosonAI API key (legacy)")
+
+# Keep single client reference for backward compatibility
+boson_client = boson_clients[0] if boson_clients else None
+
+# API key cycling state
+current_key_index = 0
+API_REQUEST_TIMEOUT = 10.0  # seconds - timeout for BosonAI requests
+
+# Lock to ensure sequential API calls within same conversation turn
+import asyncio
+api_call_lock = asyncio.Lock()
+
+
+async def call_bosonai_with_retry(func_name: str, use_lock: bool = True, **kwargs):
+    """
+    Call a BosonAI function with automatic key cycling on timeout.
+    Tries each available API key in sequence until one succeeds or all fail.
+    
+    Args:
+        func_name: Name of the function to call (e.g., 'chat.completions.create', 'audio.speech.create')
+        use_lock: Whether to use the lock to ensure sequential calls (default: True)
+        **kwargs: Arguments to pass to the BosonAI function
+    
+    Returns:
+        The response from BosonAI, or None if all keys fail
+    """
+    global current_key_index
+    
+    if not boson_clients:
+        log("[BosonAI not configured - set BOSONAI_API_KEY1/2/3 env vars]")
+        return None
+    
+    import asyncio
+    
+    # Use lock to ensure sequential calls within same conversation turn use same API key
+    async def _make_call():
+        global current_key_index
+        
+        # Try each API key in sequence
+        num_keys = len(boson_clients)
+        for attempt in range(num_keys):
+            key_idx = (current_key_index + attempt) % num_keys
+            client = boson_clients[key_idx]
+            
+            try:
+                log(f"Attempting BosonAI call with API key #{key_idx + 1} (timeout: {API_REQUEST_TIMEOUT}s)...")
+                
+                # Parse the function path (e.g., "chat.completions.create" -> client.chat.completions.create)
+                func = client
+                for part in func_name.split('.'):
+                    func = getattr(func, part)
+                
+                # Call the function with timeout
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(func, **kwargs),
+                    timeout=API_REQUEST_TIMEOUT
+                )
+                
+                # Success! Update current key index for next call
+                if key_idx != current_key_index:
+                    log(f"✅ Switched to API key #{key_idx + 1} successfully")
+                    current_key_index = key_idx
+                
+                return response
+                
+            except asyncio.TimeoutError:
+                log(f"⏱️ API key #{key_idx + 1} timed out after {API_REQUEST_TIMEOUT}s")
+                if attempt < num_keys - 1:
+                    log(f"🔄 Trying next API key...")
+                continue
+                
+            except Exception as e:
+                log(f"❌ API key #{key_idx + 1} failed: {e}")
+                if attempt < num_keys - 1:
+                    log(f"🔄 Trying next API key...")
+                continue
+        
+        # All keys failed
+        log(f"❌ All {num_keys} API keys failed")
+        return None
+    
+    # Execute with or without lock
+    if use_lock:
+        async with api_call_lock:
+            return await _make_call()
+    else:
+        return await _make_call()
 
 
 def mulaw8k_to_pcm16_16k(mulaw_bytes: bytes) -> bytes:
@@ -56,8 +159,8 @@ def pcm16_16k_to_mulaw8k(pcm16_16k: bytes) -> bytes:
 
 async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, stream_sid: str, conversation_history: list, call_sid: str, wav_file=None):
     """Send PCM16 16kHz audio to BosonAI and stream response back to Twilio."""
-    if not boson_client:
-        log("[BosonAI not configured - set BOSONAI_API_KEY env var]")
+    if not boson_clients:
+        log("[BosonAI not configured - set BOSONAI_API_KEY1/2/3 env vars]")
         return None, None, None
     
     try:
@@ -91,11 +194,11 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
 CALL ROUTING RULES:
 - If caller mentions: car warranty, IRS, Microsoft support, computer virus, student loans, credit card debt, free vacation, prize winner, "this is your final notice" → These are SPAM
 - If caller is rude, aggressive, or won't identify themselves → SPAM
-- If caller asks for Kevin by name, has legitimate business, or seems genuine → LEGITIMATE
+- If caller asks for Kevin by name, seems friendly, mentions a hackathon or school related project, has legitimate business, or seems genuine → LEGITIMATE
 
 RESPONSE FORMAT:
 After your spoken response, add ONE of these commands on a new line:
-- For legitimate callers who want Kevin: add "FORWARD_CALL"
+- For legitimate callers who want Kevin (like for a hackathon): add "FORWARD_CALL"
 - For spam/scam callers: add "END_CALL"
 
 Example spam response:
@@ -103,7 +206,7 @@ Example spam response:
 END_CALL"
 
 Example legitimate response:
-"Thank you Sarah. Let me connect you to Kevin right away.
+"Thank you Jordan. Let me connect you to Kevin right away.
 FORWARD_CALL"
 """
             }
@@ -126,12 +229,17 @@ FORWARD_CALL"
             ],
         })
         
-        # Call BosonAI following example1.py pattern
-        response = boson_client.chat.completions.create(
+        # Call BosonAI with automatic key cycling on timeout
+        response = await call_bosonai_with_retry(
+            "chat.completions.create",
             model="higgs-audio-understanding-Hackathon",
             messages=messages,
-            temperature=0.7,
+            temperature=0.2,
         )
+        
+        if not response:
+            log("Failed to get response from BosonAI (all API keys failed or timed out)")
+            return None, None, None
         
         model_response = response.choices[0].message.content
         
@@ -189,14 +297,19 @@ FORWARD_CALL"
             "content": response_text
         })
         
-        # Generate speech from text response (following example1.py pattern)
+        # Generate speech from text response with automatic key cycling
         log("Generating speech response...")
-        speech_response = boson_client.audio.speech.create(
+        speech_response = await call_bosonai_with_retry(
+            "audio.speech.create",
             model="higgs-audio-generation-Hackathon",
             voice="belinda",
             input=response_text,
             response_format="pcm"
         )
+        
+        if not speech_response:
+            log("Failed to generate speech from BosonAI (all API keys failed or timed out)")
+            return None, None, None
         
         # Audio specs from example1.py
         # num_channels = 1
@@ -238,8 +351,14 @@ FORWARD_CALL"
         
         # Add delay to let audio clear from the phone line (prevent echo detection)
         import asyncio
-        log("Waiting for bot audio to finish playing on caller's end...")
-        await asyncio.sleep(3.0)  # Increased to 3 seconds - give more time for audio to clear
+        
+        # Calculate actual audio duration and add buffer time
+        audio_duration_seconds = len(pcm16_8k_full) / (8000 * 2)  # samples / (sample_rate * bytes_per_sample)
+        # Add extra 2 seconds for network latency, phone processing, and safety margin
+        wait_time = audio_duration_seconds + 2.0
+        
+        log(f"Waiting {wait_time:.1f}s for bot audio to finish playing ({audio_duration_seconds:.1f}s audio + 2s buffer)...")
+        await asyncio.sleep(wait_time)
         
         # Execute action if needed
         if action == "FORWARD":
@@ -388,11 +507,11 @@ async def return_twiml(request: Request):
     host = request.headers.get('host', f'localhost:{HTTP_SERVER_PORT}')
     protocol = 'wss' if request.url.scheme == 'https' else 'ws'
     
-    # Use <Connect> with INBOUND ONLY streaming to prevent echo
+    # Use <Connect> with BIDIRECTIONAL streaming (both_tracks) to allow bot to speak
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{protocol}://{host}/media-stream" track="inbound_track" />
+        <Stream url="{protocol}://{host}/media-stream" />
     </Connect>
 </Response>"""
     
@@ -401,20 +520,25 @@ async def return_twiml(request: Request):
 
 async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
     """Send initial greeting when call starts."""
-    if not boson_client:
+    if not boson_clients:
         return
     
     try:
         greeting_text = "Hi, you've reached the office of Kevin Peng. How can I help you today?"
         log(f"Sending greeting: {greeting_text}")
         
-        # Generate speech from greeting
-        speech_response = boson_client.audio.speech.create(
+        # Generate speech from greeting with automatic key cycling
+        speech_response = await call_bosonai_with_retry(
+            "audio.speech.create",
             model="higgs-audio-generation-Hackathon",
             voice="mabel",
             input=greeting_text,
             response_format="pcm"
         )
+        
+        if not speech_response:
+            log("Failed to generate greeting from BosonAI (all API keys failed or timed out)")
+            return None
         
         pcm_data = speech_response.content
         log(f"Received {len(pcm_data)} bytes of PCM audio for greeting")
@@ -446,7 +570,14 @@ async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
         
         # Add delay to let greeting audio clear from the line
         import asyncio
-        await asyncio.sleep(3.0)  # Increased to 3 seconds - give more time
+        
+        # Calculate actual audio duration and add buffer time
+        audio_duration_seconds = len(pcm16_8k_full) / (8000 * 2)  # samples / (sample_rate * bytes_per_sample)
+        # Add extra 2 seconds for network latency, phone processing, and safety margin
+        wait_time = audio_duration_seconds + 2.0
+        
+        log(f"Waiting {wait_time:.1f}s for greeting to finish playing ({audio_duration_seconds:.1f}s audio + 2s buffer)...")
+        await asyncio.sleep(wait_time)
         
         return greeting_text
         
@@ -474,10 +605,12 @@ async def media_stream(websocket: WebSocket):
     
     # Track bot speaking state to prevent VAD during bot responses
     bot_is_speaking = False
+    bot_finished_time = None  # Track when bot finished speaking for debounce
+    DEBOUNCE_SECONDS = 0.5  # Ignore audio for this long after bot finishes (prevent echo pickup)
     
     # Callback for when VAD detects a complete utterance
     async def on_utterance(pcm16_16k: bytes, speech_duration_ms: int):
-        nonlocal bot_is_speaking, buf_pcm16_8k, sil_ms, speech_ms, utt_ms, in_speech
+        nonlocal bot_is_speaking, buf_pcm16_8k, sil_ms, speech_ms, utt_ms, in_speech, bot_finished_time
         
         # Ignore very short utterances (breath, noise, feedback)
         if speech_duration_ms < MIN_SPEECH_MS:
@@ -488,6 +621,7 @@ async def media_stream(websocket: WebSocket):
         
         # Set flag to disable VAD during bot response
         bot_is_speaking = True
+        bot_finished_time = None  # Clear debounce timer during processing
         
         # Clear VAD buffer immediately to prevent echo detection
         buf_pcm16_8k.clear()
@@ -515,12 +649,16 @@ async def media_stream(websocket: WebSocket):
         # Re-enable VAD after bot finishes speaking (with delay built into process_utterance_and_respond)
         bot_is_speaking = False
         
+        # Set debounce time to ignore immediate audio feedback/echo
+        import time
+        bot_finished_time = time.time()
+        
         # Clear buffers again after bot response to ensure clean slate
         buf_pcm16_8k.clear()
         sil_ms = speech_ms = utt_ms = 0
         in_speech = False
         
-        log("Bot finished speaking - listening for caller...")
+        log(f"Bot finished speaking - debouncing for {DEBOUNCE_SECONDS}s, then listening for caller...")
     
     # Simple utterance detector (we'll handle VAD manually for async callback)
     vad = webrtcvad.Vad(VAD_MODE)
@@ -568,15 +706,29 @@ async def media_stream(websocket: WebSocket):
                 log(f"BosonAI bot ready")
             
             elif data['event'] == "media":
-                # Skip all media processing if bot is speaking (includes greeting)
+                # Always write to WAV for complete recording
+                payload = data['media']['payload']
+                mulaw_data = base64.b64decode(payload)
+                if wav_file:
+                    pcm_data = audioop.ulaw2lin(mulaw_data, 2)
+                    wav_file.writeframes(pcm_data)
+                
+                # Skip VAD processing if bot is speaking (but keep recording above)
                 if bot_is_speaking:
-                    # Still write to WAV for complete recording, but don't process for VAD
-                    payload = data['media']['payload']
-                    mulaw_data = base64.b64decode(payload)
-                    if wav_file:
-                        pcm_data = audioop.ulaw2lin(mulaw_data, 2)
-                        wav_file.writeframes(pcm_data)
                     continue
+                
+                # Check debounce period - skip VAD immediately after bot finishes speaking
+                if bot_finished_time is not None:
+                    import time
+                    time_since_bot_finished = time.time() - bot_finished_time
+                    if time_since_bot_finished < DEBOUNCE_SECONDS:
+                        # Still in debounce period - skip VAD processing
+                        continue
+                    else:
+                        # Debounce period over - clear the timer and resume normal processing
+                        if bot_finished_time is not None:  # Only log once
+                            log("Debounce period over - resuming VAD")
+                            bot_finished_time = None
                 
                 if not has_seen_media:
                     log("Media message received - streaming audio with VAD...")
@@ -602,19 +754,17 @@ async def media_stream(websocket: WebSocket):
                         sil_ms = speech_ms = utt_ms = 0
                         in_speech = False
                         bot_is_speaking = False
+                        
+                        # Set debounce time after greeting
+                        import time
+                        bot_finished_time = time.time()
+                        
                         greeting_sent = True
-                        log("Greeting complete - VAD buffers cleared, ready for caller")
+                        log(f"Greeting complete - VAD buffers cleared, debouncing for {DEBOUNCE_SECONDS}s, then ready for caller")
                         continue  # Skip processing this packet
                 
-                payload = data['media']['payload']  # base64 encoded mulaw audio
-                mulaw_data = base64.b64decode(payload)
-                
-                # Write caller audio (8kHz PCM) to WAV file for archival
-                if wav_file:
-                    pcm_data = audioop.ulaw2lin(mulaw_data, 2)
-                    wav_file.writeframes(pcm_data)
-                
                 # Add to buffer and process in 20ms frames (160 bytes μ-law)
+                # (mulaw_data already extracted at top of media event handler)
                 mulaw_buffer.extend(mulaw_data)
                 
                 # Process complete 20ms frames for VAD
