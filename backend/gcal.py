@@ -55,11 +55,15 @@ def get_current_event() -> str:
         service = get_calendar_service()
         now = datetime.now()
         
-        # Get events happening right now
+        # Get events from 12 hours ago to 12 hours from now to capture current events
+        # This ensures we catch events that started earlier but are still ongoing
+        time_min = (now - timedelta(hours=12)).isoformat() + 'Z'
+        time_max = (now + timedelta(hours=12)).isoformat() + 'Z'
+        
         events_result = service.events().list(
             calendarId='primary',
-            timeMin=now.isoformat() + 'Z',
-            timeMax=(now + timedelta(minutes=1)).isoformat() + 'Z',
+            timeMin=time_min,
+            timeMax=time_max,
             singleEvents=True,
             orderBy='startTime'
         ).execute()
@@ -69,18 +73,32 @@ def get_current_event() -> str:
         if not events:
             return "No current events"
         
-        # Get the first current event
-        event = events[0]
-        title = event.get('summary', 'Busy')
+        # Find events that are happening RIGHT NOW (started <= now < end)
+        for event in events:
+            start_str = event['start'].get('dateTime', event['start'].get('date'))
+            end_str = event['end'].get('dateTime', event['end'].get('date'))
+            
+            # Skip all-day events for "current event" check
+            if 'T' not in start_str:
+                continue
+            
+            # Parse start and end times
+            event_start = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+            event_end = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+            
+            # Make times timezone-naive for comparison (assuming local timezone)
+            if event_start.tzinfo:
+                event_start = event_start.replace(tzinfo=None)
+            if event_end.tzinfo:
+                event_end = event_end.replace(tzinfo=None)
+            
+            # Check if this event is happening right now
+            if event_start <= now < event_end:
+                title = event.get('summary', 'Busy')
+                end_formatted = event_end.strftime('%I:%M %p').lstrip('0')
+                return f"{title} (until {end_formatted})"
         
-        # Parse end time
-        end_str = event['end'].get('dateTime', event['end'].get('date'))
-        if 'T' in end_str:
-            end_time = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
-            end_formatted = end_time.strftime('%I:%M %p').lstrip('0')
-            return f"{title} (until {end_formatted})"
-        else:
-            return f"{title} (all day event)"
+        return "No current events"
             
     except Exception as e:
         return f"Error checking calendar: {e}"

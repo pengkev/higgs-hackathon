@@ -5,40 +5,284 @@ import base64
 import uvicorn
 from datetime import datetime
 import os
+import re
 import audioop
 import wave
 import webrtcvad
 import openai
 from dotenv import load_dotenv
+from gcal import get_current_event, book_next_available
 
 load_dotenv()
 
 HTTP_SERVER_PORT = 8080
 RECORDINGS_DIR = "recordings"
+TRANSCRIPTS_DIR = "transcripts"
 KEVIN_PHONE_NUMBER = os.getenv("PERSONAL_PHONE")  # Set in .env file
 
 # VAD configuration
 VAD_MODE = 2           # 0-3, 3=most aggressive
 FRAME_MS = 20          # must be 10/20/30 ms
-END_SIL_MS = 1200      # silence threshold to end utterance (increased from 800ms)
-MAX_UTT_MS = 10000     # max utterance length
+END_SIL_MS = 1000      # silence threshold to end utterance (1.5 seconds - wait for caller to finish)
+MAX_UTT_MS = 20000     # max utterance length
 MIN_SPEECH_MS = 500    # minimum speech duration to count as valid utterance (ignore breath/noise)
+MIN_EXCHANGES_BEFORE_ACTION = 0
+VOICE = "belinda"
+
+# Echo/Delay configuration (tune these to adjust timing)
+POST_AUDIO_DELAY_SECONDS = 0.5   # Fixed delay after bot audio finishes playing before accepting user input
 
 # Create recordings directory if it doesn't exist
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
+os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
 
 app = FastAPI()
 
-# Initialize BosonAI client (optional - set BOSONAI_API_KEY env var to enable)
-boson_client = None
-if os.getenv("BOSONAI_API_KEY"):
-    boson_client = openai.Client(
-        api_key=os.getenv("BOSONAI_API_KEY"),
-        base_url="https://hackathon.boson.ai/v1"
-    )
-
 def log(msg, *args):
     print(f"Media WS: {msg}", *args)
+
+
+# Initialize BosonAI clients with multiple API keys for cycling
+boson_clients = []
+boson_api_keys = []
+
+# Load all available API keys (BOSONAI_API_KEY1, BOSONAI_API_KEY2, BOSONAI_API_KEY3)
+for i in range(1, 6):
+    api_key = os.getenv(f"BOSONAI_API_KEY{i}")
+    if api_key:
+        boson_api_keys.append(api_key)
+        boson_clients.append(openai.Client(
+            api_key=api_key,
+            base_url="https://hackathon.boson.ai/v1"
+        ))
+        log(f"Loaded BosonAI API key #{i}")
+
+# Fallback to single BOSONAI_API_KEY if numbered keys not found
+if not boson_clients and os.getenv("BOSONAI_API_KEY"):
+    boson_api_keys.append(os.getenv("BOSONAI_API_KEY"))
+    boson_clients.append(openai.Client(
+        api_key=os.getenv("BOSONAI_API_KEY"),
+        base_url="https://hackathon.boson.ai/v1"
+    ))
+    log("Loaded BosonAI API key (legacy)")
+
+# Keep single client reference for backward compatibility
+boson_client = boson_clients[0] if boson_clients else None
+
+# API key cycling state
+current_key_index = 0
+API_REQUEST_TIMEOUT = 10.0  # seconds - timeout for BosonAI requests
+
+# Lock to ensure sequential API calls within same conversation turn
+import asyncio
+api_call_lock = asyncio.Lock()
+
+
+async def call_bosonai_with_retry(func_name: str, use_lock: bool = True, **kwargs):
+    """
+    Call a BosonAI function with automatic key cycling on timeout.
+    Tries each available API key in sequence until one succeeds or all fail.
+    
+    Args:
+        func_name: Name of the function to call (e.g., 'chat.completions.create', 'audio.speech.create')
+        use_lock: Whether to use the lock to ensure sequential calls (default: True)
+        **kwargs: Arguments to pass to the BosonAI function
+    
+    Returns:
+        The response from BosonAI, or None if all keys fail
+    """
+    global current_key_index
+    
+    if not boson_clients:
+        log("[BosonAI not configured - set BOSONAI_API_KEY1/2/3 env vars]")
+        return None
+    
+    import asyncio
+    
+    # Use lock to ensure sequential calls within same conversation turn use same API key
+    async def _make_call():
+        global current_key_index
+        
+        # Try each API key in sequence
+        num_keys = len(boson_clients)
+        for attempt in range(num_keys):
+            key_idx = (current_key_index + attempt) % num_keys
+            client = boson_clients[key_idx]
+            
+            try:
+                log(f"Attempting BosonAI call with API key #{key_idx + 1} (timeout: {API_REQUEST_TIMEOUT}s)...")
+                
+                # Parse the function path (e.g., "chat.completions.create" -> client.chat.completions.create)
+                func = client
+                for part in func_name.split('.'):
+                    func = getattr(func, part)
+                
+                # Call the function with timeout
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(func, **kwargs),
+                    timeout=API_REQUEST_TIMEOUT
+                )
+                
+                # Success! Update current key index for next call
+                if key_idx != current_key_index:
+                    log(f"✅ Switched to API key #{key_idx + 1} successfully")
+                    current_key_index = key_idx
+                
+                return response
+                
+            except asyncio.TimeoutError:
+                log(f"⏱️ API key #{key_idx + 1} timed out after {API_REQUEST_TIMEOUT}s")
+                if attempt < num_keys - 1:
+                    log(f"🔄 Trying next API key...")
+                continue
+                
+            except Exception as e:
+                log(f"❌ API key #{key_idx + 1} failed: {e}")
+                if attempt < num_keys - 1:
+                    log(f"🔄 Trying next API key...")
+                continue
+        
+        # All keys failed
+        log(f"❌ All {num_keys} API keys failed")
+        return None
+    
+    # Execute with or without lock
+    if use_lock:
+        async with api_call_lock:
+            return await _make_call()
+    else:
+        return await _make_call()
+
+
+def extract_caller_name(conversation_history: list, latest_transcription: str) -> str:
+    """
+    Extract caller's name from conversation history.
+    Looks for patterns like "This is [name]", "My name is [name]", "[name] calling", etc.
+    """
+    # Combine all caller messages
+    all_caller_text = ""
+    for msg in conversation_history:
+        if msg.get("role") == "user":
+            all_caller_text += msg.get("content", "") + " "
+    
+    all_caller_text += latest_transcription
+    
+    # Simple name extraction patterns
+    patterns = [
+        r"(?:this is|it's|i'm|my name is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:calling|here)",
+        r"(?:^|\s)([A-Z][a-z]+\s+[A-Z][a-z]+)(?:\s|$)",  # Two capitalized words
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, all_caller_text, re.IGNORECASE)
+        if match:
+            name = match.group(1).strip()
+            # Filter out common false positives
+            false_positives = ["Kevin", "Good Morning", "Good Afternoon", "Thank You"]
+            if name not in false_positives and len(name) > 2:
+                return name
+    
+    # Default if no name found
+    return "Unknown Caller"
+
+
+def clean_text_for_transcript(text: str) -> str:
+    """
+    Clean text for transcript logging by removing:
+    - <think>...</think> tags (AI reasoning)
+    - Content in brackets: [text], (text), {text}
+    """
+    import re
+    # Remove <think> tags and their content
+    cleaned = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+    # Remove bracketed content
+    cleaned = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', cleaned)
+    # Clean up extra whitespace
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
+
+
+def save_transcript(call_sid: str, from_number: str, conversation_log: list, call_start_time: datetime, call_end_time: datetime, final_action: str = None, call_in_progress: bool = False):
+    """Save call transcript to JSON file. Can be called multiple times to update the same file."""
+    try:
+        timestamp = call_start_time.strftime("%Y%m%d_%H%M%S")
+        filename = f"{TRANSCRIPTS_DIR}/transcript_{call_sid}_{timestamp}.json"
+        
+        # Calculate call duration
+        duration_seconds = (call_end_time - call_start_time).total_seconds()
+        
+        # Build transcript data
+        transcript_data = {
+            "call_sid": call_sid,
+            "from_number": from_number,
+            "start_time": call_start_time.isoformat(),
+            "end_time": call_end_time.isoformat(),
+            "duration_seconds": round(duration_seconds, 2),
+            "call_in_progress": call_in_progress,  # True if call is still active
+            "final_action": final_action,  # "FORWARD", "END", or None
+            "conversation": []
+        }
+        
+        # Process conversation log
+        for entry in conversation_log:
+            if entry['speaker'] == 'Caller':
+                caller_text = entry.get('text', None)
+                transcript_data['conversation'].append({
+                    "speaker": "Caller",
+                    "duration_ms": entry.get('duration_ms', 0),
+                    "audio_size_bytes": entry.get('audio_size', 0),
+                    "text": caller_text if caller_text else "[Transcription not available]"
+                })
+            else:  # Bot
+                transcript_data['conversation'].append({
+                    "speaker": "AI Receptionist",
+                    "text": entry.get('text', ''),
+                    "timestamp": entry.get('timestamp', '')
+                })
+        
+        # Save to JSON file
+        import json as json_module
+        with open(filename, 'w', encoding='utf-8') as f:
+            json_module.dump(transcript_data, f, indent=2, ensure_ascii=False)
+        
+        log(f"💾 Transcript saved: {filename}")
+        
+        # Also save a human-readable text version
+        txt_filename = f"{TRANSCRIPTS_DIR}/transcript_{call_sid}_{timestamp}.txt"
+        with open(txt_filename, 'w', encoding='utf-8') as f:
+            f.write(f"CALL TRANSCRIPT\n")
+            f.write(f"{'='*60}\n")
+            f.write(f"Call ID: {call_sid}\n")
+            f.write(f"From: {from_number}\n")
+            f.write(f"Start: {call_start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"End: {call_end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Duration: {duration_seconds:.1f} seconds\n")
+            if call_in_progress:
+                f.write(f"Status: CALL IN PROGRESS (transcript updating in real-time)\n")
+            if final_action:
+                action_text = "Forwarded to Kevin" if final_action == "FORWARD" else "Ended (Spam Detected)"
+                f.write(f"Result: {action_text}\n")
+            f.write(f"{'='*60}\n\n")
+            
+            for i, entry in enumerate(conversation_log, 1):
+                if entry['speaker'] == 'Caller':
+                    caller_text = entry.get('text', None)
+                    duration = entry.get('duration_ms', 0)
+                    if caller_text:
+                        f.write(f"[{i}] CALLER: {caller_text}\n\n")
+                    else:
+                        f.write(f"[{i}] CALLER: [Spoke for {duration}ms - transcription unavailable]\n\n")
+                else:
+                    text = entry.get('text', '')
+                    f.write(f"[{i}] AI RECEPTIONIST: {text}\n\n")
+        
+        log(f"📄 Human-readable transcript saved: {txt_filename}")
+        
+    except Exception as e:
+        log(f"Error saving transcript: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def mulaw8k_to_pcm16_16k(mulaw_bytes: bytes) -> bytes:
@@ -54,11 +298,11 @@ def pcm16_16k_to_mulaw8k(pcm16_16k: bytes) -> bytes:
     return audioop.lin2ulaw(pcm16_8k, 2)
 
 
-async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, stream_sid: str, conversation_history: list, call_sid: str, wav_file=None):
+async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, stream_sid: str, conversation_history: list, call_sid: str, wav_file=None, exchange_count: int = 0):
     """Send PCM16 16kHz audio to BosonAI and stream response back to Twilio."""
     if not boson_client:
         log("[BosonAI not configured - set BOSONAI_API_KEY env var]")
-        return None, None, None
+        return None, None, None, None
     
     try:
         # Save audio chunk to temporary WAV file (following example1.py pattern)
@@ -75,36 +319,114 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         wav_data = wav_buffer.getvalue()
         audio_base64 = base64.b64encode(wav_data).decode("utf-8")
         
-        log("Sending audio to BosonAI...")
+        log("Step 1: Transcribing caller audio...")
+        
+        # STEP 1: Transcribe the audio first
+        transcription_messages = [
+            {
+                "role": "system",
+                "content": "You are a transcription assistant. Transcribe the audio exactly as spoken. Only output the transcription text, nothing else."
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": "wav",
+                        },
+                    },
+                ],
+            }
+        ]
+        
+        transcription_response = await call_bosonai_with_retry(
+            "chat.completions.create",
+            model="higgs-audio-understanding-Hackathon",
+            messages=transcription_messages,
+            temperature=0.3,  # Lower temperature for accurate transcription
+        )
+        
+        if not transcription_response:
+            log("Failed to get transcription from BosonAI (all API keys failed or timed out)")
+            return None, None, None, None
+        
+        caller_transcription = transcription_response.choices[0].message.content
+        
+        if not caller_transcription:
+            log("No transcription received")
+            return None, None, None, None
+        
+        log(f"📝 Caller said: \"{caller_transcription}\"")
+        
+        # STEP 2: Use transcription to generate response
+        log("Step 2: Generating AI response from transcription...")
+        
+        # Get current calendar event status
+        current_event_info = get_current_event()
+        log(f"📅 Calendar status: {current_event_info}")
         
         # Build messages with conversation history
+        calendar_context = ""
+        if current_event_info and current_event_info != "No current events":
+            calendar_context = f"\n\nCALENDAR STATUS:\nKevin is currently in: {current_event_info}\n\nFor legitimate callers, if Kevin is busy, offer to book them at the next available time instead of forwarding. Use the command BOOK_MEETING on a new line after your response."
+        else:
+            calendar_context = f"\n\nCALENDAR STATUS:\nKevin is available right now (no current meetings).\n\nFor legitimate callers, you can forward them directly."
+        
         messages = [
             {
                 "role": "system",
-                "content": f"""You are a professional receptionist for Kevin Peng's office. Your job is to:
-1. Screen calls politely and professionally
-2. Identify if callers are legitimate or spam/scam
-3. For legitimate callers: collect their name, reason for calling, and offer to forward them to Kevin
-4. For suspicious calls (robocalls, scammers, telemarketers): politely end the call
-5. Keep responses brief and natural - this is a phone conversation
+                "content": f"""You are an intelligent AI receptionist for kevin's office. Your mission is to protect Kevin's time by screening calls professionally while ensuring legitimate callers reach him promptly.
 
-CALL ROUTING RULES:
-- If caller mentions: car warranty, IRS, Microsoft support, computer virus, student loans, credit card debt, free vacation, prize winner, "this is your final notice" → These are SPAM
-- If caller is rude, aggressive, or won't identify themselves → SPAM
-- If caller asks for Kevin by name, has legitimate business, or seems genuine → LEGITIMATE
+PRIMARY RESPONSIBILITIES:
+1. Greet callers warmly and professionally, yet not overeager.
+2. Quickly identify the caller's name and purpose
+3. Determine if the call is legitimate business or spam/scam
+4. Route legitimate calls to Kevin or politely dismiss spam
 
-RESPONSE FORMAT:
-After your spoken response, add ONE of these commands on a new line:
-- For legitimate callers who want Kevin: add "FORWARD_CALL"
-- For spam/scam callers: add "END_CALL"
+SPAM DETECTION - Immediately end call if caller:
+• Mentions: car warranty, IRS threats, tech support scams, debt relief, student loans, free vacation/prize, "final notice" warnings
+• Uses aggressive or threatening language
+• Refuses to identify themselves or their company
+• Has robotic voice patterns or scripted sales pitches
+• Claims to represent government agencies demanding payment
+• Offers services Kevin didn't request (solar panels, health insurance, etc.)
 
-Example spam response:
-"I'm sorry, but that sounds like a spam call. Thank you, but I need to end this call now. Goodbye.
+LEGITIMATE CALL INDICATORS:
+• Caller knows Kevin personally or professionally
+• References specific projects, meetings, or mutual contacts
+• Has genuine business inquiry with clear details
+• Polite, respectful communication
+• Clear identity and reasonable purpose
+
+CONVERSATION STYLE:
+• Be warm but efficient - keep exchanges brief (1-2 sentences)
+• Ask direct questions: "Who's calling?" "What's this regarding?"
+• Don't waste time on spam - be polite but firm
+• For legitimate callers, collect their NAME before taking action{calendar_context}
+
+SPECIAL COMMANDS (use exactly as shown):
+• When forwarding legitimate caller (Kevin is available): End your response with "FORWARD_CALL" on a new line
+• When booking for legitimate caller (Kevin is busy): End your response with "BOOK_MEETING" on a new line
+• When ending spam call: End your response with "END_CALL" on a new line
+
+EXAMPLES:
+
+Spam call:
+"I appreciate the call, but I'll need to end this conversation. Have a good day. Goodbye.
 END_CALL"
 
-Example legitimate response:
-"Thank you Sarah. Let me connect you to Kevin right away.
+Legitimate call (Kevin available):
+"Thanks for that information, Sarah. Let me connect you with Kevin right now.
 FORWARD_CALL"
+
+Legitimate call (Kevin busy):
+"I understand, Sarah. Kevin is currently in a meeting. I can book you for a 15-minute call at the next available time. Would that work?
+BOOK_MEETING"
+
+Remember: Kevin's time is valuable. Be friendly to legitimate callers, but don't hesitate to dismiss obvious spam quickly and professionally. Always get the caller's name before booking or forwarding.
+Remember to also: Receive at least two inputs from the caller prior to ending call or forwarding them. Ensure you have enough information to make the proper decision.
 """
             }
         ]
@@ -112,61 +434,82 @@ FORWARD_CALL"
         # Add conversation history
         messages.extend(conversation_history)
         
-        # Add current audio input
+        # Add transcribed caller text as user message
         messages.append({
             "role": "user",
-            "content": [
-                {
-                    "type": "input_audio",
-                    "input_audio": {
-                        "data": audio_base64,
-                        "format": "wav",
-                    },
-                },
-            ],
+            "content": caller_transcription
         })
         
-        # Call BosonAI following example1.py pattern
-        response = boson_client.chat.completions.create(
-            model="higgs-audio-understanding-Hackathon",
+        # Call BosonAI text completion model to generate response
+        response = await call_bosonai_with_retry(
+            "chat.completions.create",
+            model="Qwen3-14B-Hackathon",  # Use text model instead of audio understanding
             messages=messages,
             temperature=0.7,
         )
+        
+        if not response:
+            log("Failed to get response from BosonAI (all API keys failed or timed out)")
+            return None, None, None, None
         
         model_response = response.choices[0].message.content
         
         if not model_response:
             log("No response from BosonAI")
-            return None, None, None
-        
-        # Try to extract what the caller said (BosonAI sometimes includes transcription)
-        caller_said = None
-        if ":" in model_response or "said" in model_response.lower():
-            # BosonAI might format like "Caller: text" or mention what was said
-            # For now, just log the full response
-            pass
+            return None, None, None, None
             
-        log(f"BosonAI understood caller and responded: {model_response}")
+        log(f"🤖 AI response: {model_response}")
+        
+        # Strip out <think> tags if present (model's internal reasoning)
+        # This prevents the thinking process from triggering spam detection
+        import re
+        thinking_pattern = r'<think>.*?</think>\s*'
+        model_response_clean = re.sub(thinking_pattern, '', model_response, flags=re.DOTALL).strip()
+        
+        if model_response_clean != model_response:
+            log(f"🧠 Stripped thinking tags, clean response: {model_response_clean}")
         
         # Check for special commands (look for keywords that indicate spam/forward intent)
         action = None
-        response_text = model_response
+        response_text = model_response_clean
+        caller_name = None
+        
+        # IMPORTANT: Ignore FORWARD_CALL and END_CALL until at least 3 exchanges have occurred
+        # This ensures the AI gathers enough information before routing the call
         
         # Check for explicit commands
-        if "FORWARD_CALL" in model_response:
+        if "FORWARD_CALL" in model_response_clean:
             action = "FORWARD"
-            response_text = model_response.replace("FORWARD_CALL", "").strip()
-            log("⚡ ACTION: Forwarding call to Kevin's phone")
-        elif "END_CALL" in model_response:
+            response_text = model_response_clean.replace("FORWARD_CALL", "").strip()
+            if exchange_count < MIN_EXCHANGES_BEFORE_ACTION:
+                log(f"⏸️ FORWARD action detected but ignoring (exchange {exchange_count + 1}/{MIN_EXCHANGES_BEFORE_ACTION})")
+                action = None  # Suppress action until minimum exchanges reached
+            else:
+                log("⚡ ACTION: Forwarding call to Kevin's phone")
+        elif "BOOK_MEETING" in model_response_clean:
+            action = "BOOK"
+            response_text = model_response_clean.replace("BOOK_MEETING", "").strip()
+            log("⚡ ACTION: Booking meeting at next available time")
+            
+            # Extract caller name from conversation history
+            caller_name = extract_caller_name(conversation_history, caller_transcription)
+            log(f"📝 Extracted caller name: {caller_name}")
+        elif "END_CALL" in model_response_clean:
             action = "END"
-            response_text = model_response.replace("END_CALL", "").strip()
-            log("⚡ ACTION: Ending call (spam detected)")
+            response_text = model_response_clean.replace("END_CALL", "").strip()
+            if exchange_count < MIN_EXCHANGES_BEFORE_ACTION:
+                log(f"⏸️ END action detected but ignoring (exchange {exchange_count + 1}/{MIN_EXCHANGES_BEFORE_ACTION})")
+                action = None  # Suppress action until minimum exchanges reached
+            else:
+                log("⚡ ACTION: Ending call (spam detected)")
         else:
             # Fallback: detect spam indicators in the response
+            # Only check for spam when it's clearly the bot dismissing the call
             spam_indicators = [
-                "spam call", "spam", "scam", "end this call", "end the call",
-                "cannot assist", "can't assist", "not legitimate", "suspicious",
-                "telemarkeeter", "robocall", "goodbye"
+                "end this call", "end the call", "ending this call",
+                "cannot assist", "can't assist", "not legitimate", 
+                "telemarkeeter", "robocall", "have a good day. goodbye",
+                "need to end this", "dismiss this call"
             ]
             forward_indicators = [
                 "connect you", "forward", "transfer you", "put you through",
@@ -177,26 +520,50 @@ FORWARD_CALL"
             
             if any(indicator in response_lower for indicator in spam_indicators):
                 action = "END"
-                log("⚡ ACTION: Ending call (spam keywords detected in response)")
+                if exchange_count < MIN_EXCHANGES_BEFORE_ACTION:
+                    log(f"⏸️ END action detected (keywords) but ignoring (exchange {exchange_count + 1}/{MIN_EXCHANGES_BEFORE_ACTION})")
+                    action = None  # Suppress action until minimum exchanges reached
+                else:
+                    log("⚡ ACTION: Ending call (spam keywords detected in response)")
             elif any(indicator in response_lower for indicator in forward_indicators):
                 action = "FORWARD"
-                log("⚡ ACTION: Forwarding call (forward keywords detected in response)")
+                if exchange_count < MIN_EXCHANGES_BEFORE_ACTION:
+                    log(f"⏸️ FORWARD action detected (keywords) but ignoring (exchange {exchange_count + 1}/{MIN_EXCHANGES_BEFORE_ACTION})")
+                    action = None  # Suppress action until minimum exchanges reached
+                else:
+                    log("⚡ ACTION: Forwarding call (forward keywords detected in response)")
+
         
-        # Add to conversation history (transcription + response)
-        # Note: We're adding the assistant's response to maintain context
+        # Add to conversation history (caller's transcribed text + assistant's response)
+        conversation_history.append({
+            "role": "user",
+            "content": caller_transcription
+        })
         conversation_history.append({
             "role": "assistant",
             "content": response_text
         })
         
         # Generate speech from text response (following example1.py pattern)
-        log("Generating speech response...")
-        speech_response = boson_client.audio.speech.create(
+        log("Step 3: Generating speech from response...")
+        
+        # Remove content in brackets before TTS (stage directions, actions, etc.)
+        # Remove [text], (text), and {text} patterns
+        import re
+        tts_text = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', response_text).strip()
+        log(f"TTS input (brackets removed): {tts_text}")
+        
+        speech_response = await call_bosonai_with_retry(
+            "audio.speech.create",
             model="higgs-audio-generation-Hackathon",
-            voice="belinda",
-            input=response_text,
+            voice=VOICE,
+            input=tts_text,
             response_format="pcm"
         )
+        
+        if not speech_response:
+            log("Failed to generate speech from BosonAI (all API keys failed or timed out)")
+            return None, None, None, None
         
         # Audio specs from example1.py
         # num_channels = 1
@@ -213,6 +580,10 @@ FORWARD_CALL"
         # Write bot response to WAV file
         if wav_file:
             wav_file.writeframes(pcm16_8k_full)
+        
+        # Calculate audio duration for proper delay (PCM16 8kHz, mono, 2 bytes/sample)
+        audio_duration_seconds = len(pcm16_8k_full) / (8000 * 2)
+        log(f"Bot audio duration: {audio_duration_seconds:.2f} seconds")
         
         # Convert to μ-law and send to Twilio in chunks
         # Process in chunks to avoid memory issues
@@ -234,28 +605,98 @@ FORWARD_CALL"
                 }
             }))
         
-        log("Finished streaming response to caller - waiting for next utterance")
+        log("Finished streaming response to caller - will ignore audio during playback...")
         
-        # Add delay to let audio clear from the phone line (prevent echo detection)
-        import asyncio
-        log("Waiting for bot audio to finish playing on caller's end...")
-        await asyncio.sleep(3.0)  # Increased to 3 seconds - give more time for audio to clear
+        # Calculate exact audio duration: PCM16 8kHz, mono, 2 bytes per sample
+        # Duration = total_bytes / (sample_rate * bytes_per_sample)
+        audio_duration_seconds = len(pcm16_8k_full) / (8000 * 2)
+        log(f"Bot audio duration: {audio_duration_seconds:.2f} seconds")
+        
+        # Total delay = exact audio playback time + fixed post-audio buffer
+        total_delay_seconds = audio_duration_seconds + POST_AUDIO_DELAY_SECONDS
+        log(f"Will block user input for {total_delay_seconds:.2f}s ({audio_duration_seconds:.2f}s audio + {POST_AUDIO_DELAY_SECONDS:.2f}s buffer)")
         
         # Execute action if needed
         if action == "FORWARD":
             log(f"📞 Forwarding call {call_sid} to {KEVIN_PHONE_NUMBER}")
             await forward_call(call_sid)
+        elif action == "BOOK":
+            log(f"📅 Booking meeting for {caller_name}")
+            booking_result = book_next_available(caller_name, caller_phone="", caller_email="")
+            log(f"✅ Booking result: {booking_result}")
+            
+            # Send confirmation message to caller
+            confirmation_text = f"Perfect! I've scheduled you for a 15-minute call with Kevin. {booking_result}. You'll receive a confirmation. Thank you for calling!"
+            
+            # Remove content in brackets before TTS
+            import re
+            confirmation_tts = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', confirmation_text).strip()
+            
+            # Generate speech for confirmation
+            speech_response = await call_bosonai_with_retry(
+                "audio.speech.create",
+                model="higgs-audio-generation-Hackathon",
+                voice=VOICE,
+                input=confirmation_tts,
+                response_format="pcm"
+            )
+            
+            if not speech_response:
+                log("Failed to generate confirmation speech from BosonAI (all API keys failed or timed out)")
+                # Still try to end the call even if speech failed
+            else:
+                pcm_data = speech_response.content
+                pcm16_8k_confirmation, _ = audioop.ratecv(pcm_data, 2, 1, 24000, 8000, None)
+                
+                # Calculate confirmation audio duration
+                confirmation_duration_seconds = len(pcm16_8k_confirmation) / (8000 * 2)
+                log(f"Confirmation audio duration: {confirmation_duration_seconds:.2f} seconds")
+                
+                # Send confirmation to caller
+                chunk_size = 1600
+                for i in range(0, len(pcm16_8k_confirmation), chunk_size):
+                    chunk = pcm16_8k_confirmation[i:i + chunk_size]
+                    if len(chunk) < 4:
+                        continue
+                    mulaw_8k = audioop.lin2ulaw(chunk, 2)
+                    await websocket.send_text(json.dumps({
+                        "event": "media",
+                        "streamSid": stream_sid,
+                        "media": {
+                            "payload": base64.b64encode(mulaw_8k).decode("utf-8")
+                        }
+                    }))
+                
+                # Wait for confirmation to play completely
+                confirmation_duration_seconds = len(pcm16_8k_confirmation) / (8000 * 2)
+                log(f"Confirmation will play for {confirmation_duration_seconds:.2f} seconds...")
+                
+                # Actually wait for the audio to finish playing
+                import asyncio
+                wait_time = confirmation_duration_seconds + 0.5  # Audio duration + small buffer
+                log(f"⏳ Waiting {wait_time:.2f}s for confirmation to finish before ending call...")
+                await asyncio.sleep(wait_time)
+            
+            # End the call after booking (and after confirmation finishes playing)
+            await end_call(call_sid)
         elif action == "END":
             log(f"🚫 Ending call {call_sid} (spam)")
+            # Wait for the goodbye message to finish playing before hanging up
+            # Audio was already sent above, now wait for it to complete
+            import asyncio
+            wait_time = audio_duration_seconds + 0.5  # Audio duration + small buffer
+            log(f"⏳ Waiting {wait_time:.2f}s for goodbye message to finish before ending call...")
+            await asyncio.sleep(wait_time)
             await end_call(call_sid)
         
-        return model_response, pcm16_8k_full, action
+        # Return total delay duration for blocking user input
+        return model_response, pcm16_8k_full, action, caller_transcription, total_delay_seconds
         
     except Exception as e:
         log(f"BosonAI error: {e}")
         import traceback
         traceback.print_exc()
-        return None, None, None
+        return None, None, None, None, 0.0
 
 
 async def forward_call(call_sid: str):
@@ -405,22 +846,35 @@ async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
         return
     
     try:
-        greeting_text = "Hi, you've reached the office of Kevin Peng. How can I help you today?"
+        greeting_text = "Hi, you've reached the office of kevin. How can I help you today?"
         log(f"Sending greeting: {greeting_text}")
         
+        # Remove content in brackets before TTS
+        import re
+        greeting_tts = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', greeting_text).strip()
+        
         # Generate speech from greeting
-        speech_response = boson_client.audio.speech.create(
+        speech_response = await call_bosonai_with_retry(
+            "audio.speech.create",
             model="higgs-audio-generation-Hackathon",
-            voice="mabel",
-            input=greeting_text,
+            voice=VOICE,
+            input=greeting_tts,
             response_format="pcm"
         )
+        
+        if not speech_response:
+            log("Failed to generate greeting speech from BosonAI (all API keys failed or timed out)")
+            return  # Cannot proceed without greeting
         
         pcm_data = speech_response.content
         log(f"Received {len(pcm_data)} bytes of PCM audio for greeting")
         
         # Convert PCM16 24kHz -> PCM16 8kHz for recording and Twilio
         pcm16_8k_full, _ = audioop.ratecv(pcm_data, 2, 1, 24000, 8000, None)
+        
+        # Calculate greeting audio duration
+        greeting_duration_seconds = len(pcm16_8k_full) / (8000 * 2)
+        log(f"Greeting audio duration: {greeting_duration_seconds:.2f} seconds")
         
         # Write bot greeting to WAV file
         if wav_file:
@@ -442,17 +896,22 @@ async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
                 }
             }))
         
-        log("Greeting sent - waiting for caller response...")
+        log("Greeting sent - will ignore audio during playback...")
         
-        # Add delay to let greeting audio clear from the line
-        import asyncio
-        await asyncio.sleep(3.0)  # Increased to 3 seconds - give more time
+        # Calculate exact audio duration: PCM16 8kHz, mono, 2 bytes per sample
+        # Duration = total_bytes / (sample_rate * bytes_per_sample)
+        greeting_duration_seconds = len(pcm16_8k_full) / (8000 * 2)
+        log(f"Greeting audio duration: {greeting_duration_seconds:.2f} seconds")
         
-        return greeting_text
+        # Total delay = exact audio playback time + fixed post-audio buffer
+        total_delay_seconds = greeting_duration_seconds + POST_AUDIO_DELAY_SECONDS
+        log(f"Will block user input for {total_delay_seconds:.2f}s ({greeting_duration_seconds:.2f}s audio + {POST_AUDIO_DELAY_SECONDS:.2f}s buffer)")
+        
+        return greeting_text, total_delay_seconds
         
     except Exception as e:
         log(f"Error sending greeting: {e}")
-        return None
+        return None, 0.0  # Return 0 duration on error
 
 
 @app.websocket("/media-stream")
@@ -466,18 +925,23 @@ async def media_stream(websocket: WebSocket):
     wav_file = None
     call_sid = None
     stream_sid = None
+    from_number = "unknown"
+    call_start_time = datetime.now()
+    final_action = None
     mulaw_buffer = bytearray()
     transcripts = []
     conversation_log = []  # Detailed conversation with caller and bot
     conversation_history = []  # Track full conversation
     greeting_sent = False
+    exchange_count = 0  # Track number of caller-bot exchanges (greeting doesn't count)
     
     # Track bot speaking state to prevent VAD during bot responses
     bot_is_speaking = False
+    bot_speaking_until = None  # Timestamp when bot will finish speaking + buffer delay
     
     # Callback for when VAD detects a complete utterance
     async def on_utterance(pcm16_16k: bytes, speech_duration_ms: int):
-        nonlocal bot_is_speaking, buf_pcm16_8k, sil_ms, speech_ms, utt_ms, in_speech
+        nonlocal bot_is_speaking, buf_pcm16_8k, sil_ms, speech_ms, utt_ms, in_speech, final_action, mulaw_buffer, exchange_count, bot_speaking_until
         
         # Ignore very short utterances (breath, noise, feedback)
         if speech_duration_ms < MIN_SPEECH_MS:
@@ -496,31 +960,52 @@ async def media_stream(websocket: WebSocket):
         
         # Process with BosonAI and stream response back
         if stream_sid:  # Make sure we have a stream_sid
-            response, bot_audio, action = await process_utterance_and_respond(pcm16_16k, websocket, stream_sid, conversation_history, call_sid, wav_file)
+            from datetime import timedelta
+            response, bot_audio, action, caller_text, delay_seconds = await process_utterance_and_respond(pcm16_16k, websocket, stream_sid, conversation_history, call_sid, wav_file, exchange_count=exchange_count)
             if response:
                 transcripts.append(response)
-                # Log the exchange
+                # Increment exchange counter (caller spoke + bot responded = 1 exchange)
+                exchange_count += 1
+                log(f"📊 Exchange count: {exchange_count}")
+                # Track final action
+                if action:
+                    final_action = action
+                # Log the exchange with caller transcription
                 conversation_log.append({
                     "speaker": "Caller",
                     "duration_ms": speech_duration_ms,
-                    "audio_size": len(pcm16_16k)
+                    "audio_size": len(pcm16_16k),
+                    "text": caller_text if caller_text else None,
+                    "timestamp": datetime.now().isoformat()
                 })
                 conversation_log.append({
                     "speaker": "Bot",
-                    "text": response
+                    "text": clean_text_for_transcript(response),
+                    "timestamp": datetime.now().isoformat()
                 })
+                
+                # Save transcript after each exchange (overwrite same file)
+                save_transcript(call_sid, from_number, conversation_log, call_start_time, datetime.now(), final_action, call_in_progress=True)
+                
+                # Set timestamp when bot will finish speaking (now + delay_seconds)
+                bot_speaking_until = datetime.now() + timedelta(seconds=delay_seconds)
+                log(f"🔇 Blocking user input until {bot_speaking_until.strftime('%H:%M:%S.%f')[:-3]} ({delay_seconds:.2f}s from now)")
         else:
             log("Warning: stream_sid not set yet, skipping utterance")
         
-        # Re-enable VAD after bot finishes speaking (with delay built into process_utterance_and_respond)
+        # Re-enable VAD immediately (timestamp check handles blocking)
         bot_is_speaking = False
         
-        # Clear buffers again after bot response to ensure clean slate
+        # CRITICAL: Clear mulaw_buffer to discard any audio that came in during bot speaking
+        # This prevents echo/noise from being processed as the next utterance
+        mulaw_buffer.clear()
+        
+        # Clear VAD buffers again after bot response to ensure clean slate
         buf_pcm16_8k.clear()
         sil_ms = speech_ms = utt_ms = 0
         in_speech = False
         
-        log("Bot finished speaking - listening for caller...")
+        log(f"✅ Bot response sent - user input blocked until {bot_speaking_until.strftime('%H:%M:%S.%f')[:-3] if bot_speaking_until else 'now'}")
     
     # Simple utterance detector (we'll handle VAD manually for async callback)
     vad = webrtcvad.Vad(VAD_MODE)
@@ -551,6 +1036,7 @@ async def media_stream(websocket: WebSocket):
                 
                 # Extract caller info if available
                 from_number = data['start'].get('customParameters', {}).get('from', 'unknown')
+                call_start_time = datetime.now()
                 log(f"Call from: {from_number}")
                 
                 # Create WAV file for this call (8 kHz native PSTN rate)
@@ -585,25 +1071,39 @@ async def media_stream(websocket: WebSocket):
                     
                     # Send greeting after first media packet (ensures stream is ready)
                     if not greeting_sent and stream_sid:
+                        from datetime import timedelta
                         bot_is_speaking = True  # Prevent VAD during greeting
-                        greeting = await send_greeting(websocket, stream_sid, wav_file)
-                        if greeting:
-                            conversation_history.append({
-                                "role": "assistant",
-                                "content": greeting
-                            })
-                            conversation_log.append({
-                                "speaker": "Bot",
-                                "text": greeting
-                            })
+                        greeting_result = await send_greeting(websocket, stream_sid, wav_file)
+                        
+                        if greeting_result:
+                            greeting, delay_seconds = greeting_result
+                            if greeting:
+                                conversation_history.append({
+                                    "role": "assistant",
+                                    "content": greeting
+                                })
+                                conversation_log.append({
+                                    "speaker": "Bot",
+                                    "text": clean_text_for_transcript(greeting),
+                                    "timestamp": datetime.now().isoformat()
+                                })
+                                
+                                # Save transcript after greeting (overwrite same file)
+                                save_transcript(call_sid, from_number, conversation_log, call_start_time, datetime.now(), final_action, call_in_progress=True)
+                            
+                            # Set timestamp when bot will finish speaking (now + delay_seconds)
+                            bot_speaking_until = datetime.now() + timedelta(seconds=delay_seconds)
+                            log(f"🔇 Blocking user input until {bot_speaking_until.strftime('%H:%M:%S.%f')[:-3]} ({delay_seconds:.2f}s from now)")
+                        
+                        # Re-enable VAD after greeting is sent (timestamp check handles blocking)
+                        bot_is_speaking = False
+                        
                         # Clear any accumulated audio during greeting
                         mulaw_buffer.clear()
                         buf_pcm16_8k.clear()
                         sil_ms = speech_ms = utt_ms = 0
                         in_speech = False
-                        bot_is_speaking = False
                         greeting_sent = True
-                        log("Greeting complete - VAD buffers cleared, ready for caller")
                         continue  # Skip processing this packet
                 
                 payload = data['media']['payload']  # base64 encoded mulaw audio
@@ -613,6 +1113,21 @@ async def media_stream(websocket: WebSocket):
                 if wav_file:
                     pcm_data = audioop.ulaw2lin(mulaw_data, 2)
                     wav_file.writeframes(pcm_data)
+                
+                # Check if we're still in the blocking period (simple timestamp check)
+                if bot_speaking_until and datetime.now() < bot_speaking_until:
+                    # Still within the delay period - ignore all audio input
+                    continue
+                elif bot_speaking_until and datetime.now() >= bot_speaking_until:
+                    # Just passed the blocking threshold - clear buffers and resume listening
+                    log(f"✅ Delay period complete - now listening for caller input")
+                    bot_speaking_until = None
+                    # Clear buffers to discard any accumulated audio/echo
+                    mulaw_buffer.clear()
+                    buf_pcm16_8k.clear()
+                    sil_ms = speech_ms = utt_ms = 0
+                    in_speech = False
+                    continue
                 
                 # Add to buffer and process in 20ms frames (160 bytes μ-law)
                 mulaw_buffer.extend(mulaw_data)
@@ -669,10 +1184,16 @@ async def media_stream(websocket: WebSocket):
         import traceback
         traceback.print_exc()
     finally:
+        call_end_time = datetime.now()
+        
         # Close the WAV file
         if wav_file:
             wav_file.close()
             log(f"WAV file saved successfully - ready to play!")
+        
+        # Save final transcript to file (mark as complete)
+        if conversation_log and call_sid:
+            save_transcript(call_sid, from_number, conversation_log, call_start_time, call_end_time, final_action, call_in_progress=False)
         
         # Log full conversation
         if conversation_log:
@@ -681,9 +1202,13 @@ async def media_stream(websocket: WebSocket):
             log(f"{'='*60}")
             for i, entry in enumerate(conversation_log, 1):
                 if entry['speaker'] == 'Caller':
+                    caller_text = entry.get('text', None)
                     duration = entry.get('duration_ms', 0)
                     audio_size = entry.get('audio_size', 0)
-                    log(f"[{i}] 📞 Caller spoke: {duration}ms ({audio_size} bytes audio)")
+                    if caller_text:
+                        log(f"[{i}] 📞 Caller: \"{caller_text}\" ({duration}ms, {audio_size} bytes)")
+                    else:
+                        log(f"[{i}] 📞 Caller: [Audio {duration}ms, {audio_size} bytes - no transcription]")
                 else:
                     text = entry.get('text', '')
                     log(f"[{i}] 🤖 Bot: {text}")
@@ -709,6 +1234,13 @@ async def root():
             "websocket": "/media-stream (WebSocket)"
         }
     }
+
+
+@app.post("/")
+async def root_post(request: Request):
+    """Handle POST requests to root - redirect to /twiml"""
+    log("POST request to / - redirecting to /twiml handler")
+    return await return_twiml(request)
 
 
 if __name__ == '__main__':
