@@ -298,6 +298,162 @@ def pcm16_16k_to_mulaw8k(pcm16_16k: bytes) -> bytes:
     return audioop.lin2ulaw(pcm16_8k, 2)
 
 
+async def get_call_info(call_sid: str) -> dict:
+    """
+    Retrieve detailed information about a call including AI-generated summary.
+    
+    Returns a dictionary with:
+        id: str - Call SID
+        number: str - Caller phone number
+        name: str - Extracted caller name
+        description: str - AI-generated summary of the call
+        spam: bool - Whether call was marked as spam
+        date: datetime - Call start time
+        unread: bool - Whether call has been reviewed (always False for now)
+        recording: str - Path to WAV recording file
+        transcript: str - Path to transcript JSON file
+    """
+    import glob
+    import json as json_module
+    from pathlib import Path
+    
+    try:
+        # Find transcript file for this call_sid
+        transcript_pattern = f"{TRANSCRIPTS_DIR}/transcript_{call_sid}_*.json"
+        transcript_files = glob.glob(transcript_pattern)
+        
+        if not transcript_files:
+            log(f"No transcript found for call {call_sid}")
+            return None
+        
+        # Use the most recent transcript if multiple exist
+        transcript_path = sorted(transcript_files)[-1]
+        
+        # Load transcript data
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            transcript_data = json_module.load(f)
+        
+        # Extract basic info
+        call_id = transcript_data.get('call_sid', call_sid)
+        from_number = transcript_data.get('from_number', 'Unknown')
+        start_time_str = transcript_data.get('start_time')
+        start_time = datetime.fromisoformat(start_time_str) if start_time_str else datetime.now()
+        final_action = transcript_data.get('final_action')
+        is_spam = final_action == "END"
+        
+        # Extract caller name from conversation
+        caller_name = "Unknown Caller"
+        conversation = transcript_data.get('conversation', [])
+        for entry in conversation:
+            if entry.get('speaker') == 'Caller' and entry.get('text'):
+                # Try to extract name from first caller message
+                import re
+                text = entry.get('text', '')
+                patterns = [
+                    r"(?:this is|it's|i'm|my name is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+                    r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:calling|here)",
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    if match:
+                        name = match.group(1).strip()
+                        if len(name) > 2:
+                            caller_name = name
+                            break
+                if caller_name != "Unknown Caller":
+                    break
+        
+        # Find corresponding recording file
+        recording_pattern = f"{RECORDINGS_DIR}/call_{call_sid}_*.wav"
+        recording_files = glob.glob(recording_pattern)
+        recording_path = sorted(recording_files)[-1] if recording_files else None
+        
+        # Generate AI summary of the conversation
+        description = await generate_call_summary(conversation)
+        
+        # Build result dictionary
+        result = {
+            "id": call_id,
+            "number": from_number,
+            "name": caller_name,
+            "description": description,
+            "spam": is_spam,
+            "date": start_time,
+            "unread": False,  # Could be implemented with a separate tracking system
+            "recording": recording_path,
+            "transcript": transcript_path
+        }
+        
+        return result
+        
+    except Exception as e:
+        log(f"Error getting call info: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+async def generate_call_summary(conversation: list) -> str:
+    """
+    Generate a concise summary of the call conversation using AI.
+    
+    Args:
+        conversation: List of conversation entries from transcript
+        
+    Returns:
+        A brief summary string describing the call
+    """
+    if not boson_client or not conversation:
+        return "No conversation data available"
+    
+    try:
+        # Build a readable conversation text
+        conversation_text = ""
+        for entry in conversation:
+            speaker = entry.get('speaker', 'Unknown')
+            text = entry.get('text', '[No text]')
+            conversation_text += f"{speaker}: {text}\n"
+        
+        # Prompt the AI to summarize
+        summary_prompt = f"""Summarize the following phone call conversation in 1-2 sentences. Focus on:
+- Who called and why
+- What action was taken (forwarded, booked meeting, or ended as spam)
+
+Conversation:
+{conversation_text}
+
+Provide only the summary, nothing else."""
+        
+        response = await call_bosonai_with_retry(
+            "chat.completions.create",
+            model="Qwen3-14B-Hackathon",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that creates concise call summaries."
+                },
+                {
+                    "role": "user",
+                    "content": summary_prompt
+                }
+            ],
+            temperature=0.3,  # Lower temperature for consistent summaries
+        )
+        
+        if response and response.choices[0].message.content:
+            summary = response.choices[0].message.content.strip()
+            # Remove any thinking tags
+            import re
+            summary = re.sub(r'<think>.*?</think>\s*', '', summary, flags=re.DOTALL).strip()
+            return summary
+        else:
+            return "Unable to generate summary"
+            
+    except Exception as e:
+        log(f"Error generating summary: {e}")
+        return "Error generating summary"
+
+
 async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, stream_sid: str, conversation_history: list, call_sid: str, wav_file=None, exchange_count: int = 0):
     """Send PCM16 16kHz audio to BosonAI and stream response back to Twilio."""
     if not boson_client:
@@ -377,56 +533,101 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         messages = [
             {
                 "role": "system",
-                "content": f"""You are an intelligent AI receptionist for kevin's office. Your mission is to protect Kevin's time by screening calls professionally while ensuring legitimate callers reach him promptly.
+                # ...existing code...
+                "content": f"""You are Kevin's professional AI receptionist. Your core mission: protect Kevin's valuable time while ensuring legitimate callers receive excellent service.
 
 PRIMARY RESPONSIBILITIES:
-1. Greet callers warmly and professionally, yet not overeager.
-2. Quickly identify the caller's name and purpose
-3. Determine if the call is legitimate business or spam/scam
-4. Route legitimate calls to Kevin or politely dismiss spam
+1. Greet callers warmly but professionally - be helpful, not desperate
+2. Quickly identify caller's name and purpose through strategic questioning
+3. Make high-confidence decisions: legitimate business vs. spam/scam
+4. Route appropriately: forward, book, gather more info, or politely dismiss
 
-SPAM DETECTION - Immediately end call if caller:
-• Mentions: car warranty, IRS threats, tech support scams, debt relief, student loans, free vacation/prize, "final notice" warnings
-• Uses aggressive or threatening language
-• Refuses to identify themselves or their company
-• Has robotic voice patterns or scripted sales pitches
-• Claims to represent government agencies demanding payment
-• Offers services Kevin didn't request (solar panels, health insurance, etc.)
+SPAM DETECTION - End call immediately if caller:
+• Mentions classic scams: car warranty, IRS threats, tech support, debt relief, student loans, free vacations, "final notice" warnings, extended warranties
+• Uses aggressive, threatening, or high-pressure language
+• Refuses to provide name, company, or clear purpose after 2 requests
+• Has obviously robotic voice, pre-recorded messages, or scripted sales pitches
+• Claims to represent government agencies demanding immediate payment
+• Offers unrequested services (solar, insurance, home security, etc.)
+• Makes vague threats or creates false urgency ("act now or lose...")
+• Has background noise typical of call centers (many voices, beeping)
 
 LEGITIMATE CALL INDICATORS:
-• Caller knows Kevin personally or professionally
-• References specific projects, meetings, or mutual contacts
-• Has genuine business inquiry with clear details
-• Polite, respectful communication
-• Clear identity and reasonable purpose
+• Knows Kevin personally or professionally (mentions past interactions)
+• References specific projects, deliverables, mutual contacts, or previous conversations
+• Has well-articulated business inquiry with concrete details
+• Professional, respectful, patient communication style
+• Provides clear company/organization affiliation
+• Purpose aligns with Kevin's known work or interests
+• Willing to provide contact information for callback
+
+NEED MORE INFORMATION - Gather details when caller:
+• Mentions potentially valuable opportunity but lacks specifics
+• References a project/topic Kevin might be interested in but seems unclear
+• Claims to have been referred by someone but you need to verify legitimacy
+• Has a reasonable purpose but hasn't provided their name yet
+• Situation is ambiguous - could be legitimate business or sophisticated sales
+• You're 60-80% confident they're legitimate but need one more data point
+
+When gathering more info, ask targeted questions:
+- "Can you tell me which project this is regarding?"
+- "Who referred you to Kevin?"
+- "What company are you with?"
+- "Can you be more specific about what you'd like to discuss?"
 
 CONVERSATION STYLE:
-• Be warm but efficient - keep exchanges brief (1-2 sentences)
-• Ask direct questions: "Who's calling?" "What's this regarding?"
-• Don't waste time on spam - be polite but firm
-• For legitimate callers, collect their NAME before taking action{calendar_context}
+• Warm but efficient - respect everyone's time (1-2 sentence responses)
+• Direct questions get direct answers: "May I ask who's calling?" "What's this regarding?"
+• Professional skepticism with spam - polite but firm dismissal
+• For legitimate callers, ALWAYS collect NAME before forwarding/booking
+• Natural conversation flow - don't sound scripted{calendar_context}
 
-SPECIAL COMMANDS (use exactly as shown):
-• When forwarding legitimate caller (Kevin is available): End your response with "FORWARD_CALL" on a new line
-• When booking for legitimate caller (Kevin is busy): End your response with "BOOK_MEETING" on a new line
-• When ending spam call: End your response with "END_CALL" on a new line
+DECISION RULES:
+• Minimum 2 exchanges before FORWARD_CALL or END_CALL (gather sufficient context)
+• Collect caller's NAME before BOOK_MEETING or FORWARD_CALL
+• When in doubt between legitimate and spam → ask ONE more clarifying question
+• Never forward obvious spam just to avoid confrontation
+• Never dismiss legitimate callers because they're brief or nervous
 
-EXAMPLES:
+SPECIAL COMMANDS (use exactly as shown on NEW LINE after your response):
+• FORWARD_CALL - Connect caller to Kevin immediately (only when Kevin is available and call is legitimate)
+• BOOK_MEETING - Schedule caller for next available slot (only when Kevin is busy and call is legitimate)
+• END_CALL - Politely end the call (only for confirmed spam/scam)
+• MORE_INFO - Continue conversation to gather additional details (when legitimacy is unclear)
 
-Spam call:
-"I appreciate the call, but I'll need to end this conversation. Have a good day. Goodbye.
+EXAMPLE CONVERSATIONS:
+
+Example 1 - Obvious Spam:
+Caller: "This is your final notice about your car's extended warranty—"
+You: "I appreciate the call, but we're not interested. Have a good day.
 END_CALL"
 
-Legitimate call (Kevin available):
-"Thanks for that information, Sarah. Let me connect you with Kevin right now.
+Example 2 - Legitimate, Kevin Available:
+Caller: "Hi, this is Sarah from Acme Corp. Kevin and I spoke last week about the Q3 project."
+You: "Thanks for calling, Sarah. Let me connect you with Kevin right now.
 FORWARD_CALL"
 
-Legitimate call (Kevin busy):
-"I understand, Sarah. Kevin is currently in a meeting. I can book you for a 15-minute call at the next available time. Would that work?
+Example 3 - Legitimate, Kevin Busy:
+Caller: "This is John Chen, I'm following up on the proposal Kevin requested."
+You: "Thanks, John. Kevin is currently in a meeting. I can book you for his next available 15-minute slot. Would that work?
 BOOK_MEETING"
 
-Remember: Kevin's time is valuable. Be friendly to legitimate callers, but don't hesitate to dismiss obvious spam quickly and professionally. Always get the caller's name before booking or forwarding.
-Remember to also: Receive at least two inputs from the caller prior to ending call or forwarding them. Ensure you have enough information to make the proper decision.
+Example 4 - Need More Information:
+Caller: "I was referred to Kevin about a potential collaboration."
+You: "I'd be happy to help. Who referred you, and what type of collaboration were you hoping to discuss?
+MORE_INFO"
+
+Example 5 - Sophisticated Sales (needs verification):
+Caller: "Hi, I'm calling from TechCo about enterprise solutions."
+You: "May I ask who specifically at TechCo referred you to Kevin, or how you got his contact information?
+MORE_INFO"
+
+CRITICAL REMINDERS:
+• Kevin's time is his most valuable asset - protect it ruthlessly
+• Be courteous to everyone, but don't let politeness override judgment
+• Legitimate callers understand reasonable screening - they won't be offended
+• Trust your assessment - if it feels like spam, it probably is
+• Quality over quantity - one legitimate connected call > ten spam dismissals
 """
             }
         ]
@@ -1231,9 +1432,77 @@ async def root():
         "message": "Twilio Media Stream FastAPI Server",
         "endpoints": {
             "twiml": "/twiml (POST)",
-            "websocket": "/media-stream (WebSocket)"
+            "websocket": "/media-stream (WebSocket)",
+            "call_info": "/call/{call_sid} (GET)",
+            "calls": "/calls (GET)"
         }
     }
+
+
+@app.get("/call/{call_sid}")
+async def get_call(call_sid: str):
+    """
+    Get detailed information about a specific call.
+    
+    Returns:
+        Call information including AI-generated summary, transcript, and recording paths
+    """
+    call_info = await get_call_info(call_sid)
+    
+    if not call_info:
+        return {
+            "error": "Call not found",
+            "call_sid": call_sid
+        }
+    
+    # Convert datetime to ISO string for JSON serialization
+    if call_info.get('date'):
+        call_info['date'] = call_info['date'].isoformat()
+    
+    return call_info
+
+
+@app.get("/calls")
+async def list_calls():
+    """
+    List all available calls with their information.
+    
+    Returns:
+        List of call information dictionaries
+    """
+    import glob
+    import json as json_module
+    
+    try:
+        # Find all transcript files
+        transcript_files = glob.glob(f"{TRANSCRIPTS_DIR}/transcript_*.json")
+        
+        calls = []
+        for transcript_path in sorted(transcript_files, reverse=True):  # Most recent first
+            # Extract call_sid from filename
+            # Format: transcript_{call_sid}_{timestamp}.json
+            import re
+            match = re.search(r'transcript_([^_]+)_', transcript_path)
+            if match:
+                call_sid = match.group(1)
+                call_info = await get_call_info(call_sid)
+                if call_info:
+                    # Convert datetime to ISO string
+                    if call_info.get('date'):
+                        call_info['date'] = call_info['date'].isoformat()
+                    calls.append(call_info)
+        
+        return {
+            "total": len(calls),
+            "calls": calls
+        }
+        
+    except Exception as e:
+        log(f"Error listing calls: {e}")
+        return {
+            "error": str(e),
+            "calls": []
+        }
 
 
 @app.post("/")
