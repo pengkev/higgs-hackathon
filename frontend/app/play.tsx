@@ -143,7 +143,10 @@ export default function AudioOverlay({
   return (
     <Pressable
       className="absolute inset-0 z-[9999] items-center justify-center bg-black/70"
-      onPress={onClose}
+      onPress={()=> {
+        player.pause()
+        onClose?.()
+      }}
     >
       {loading ? (
         <ActivityIndicator size="large" />
