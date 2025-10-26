@@ -1,9 +1,17 @@
 import axios from 'axios';
+import { Platform } from "react-native";
 
-// For Expo/React Native: Use your computer's local IP address
-// Port 8000 is the database API server (backend/database/main.py)
+
+let baseURL = "http://localhost:8000";
+
+if (Platform.OS != "web") {
+  // running on device or emulator
+  baseURL = "http://192.1.1.258:8000"; // put the real ip here
+}
+
 const api = axios.create({
-  baseURL: 'http://100.66.74.139:8000',
+  baseURL: baseURL, 
+
 });
 
 export default api;
