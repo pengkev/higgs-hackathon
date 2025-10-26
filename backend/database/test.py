@@ -37,8 +37,8 @@ if __name__ == "__main__":
     # #     recording="call1.wav",
     # # )
     #add_object_row(sqlite_url, voicemails)
-    print(read_table(sqlite_url))
-    get_recording(sqlite_url, 3)
+    #print(read_table(sqlite_url))
+    print(get_recording(sqlite_url, 3))
     # add_row(sqlite_url, vc_add)
     # print(read_table(sqlite_url)[2].recording)
     # bytes_to_wav(read_table(sqlite_url)[2].recording, 'output.wav', 1, 2, 8000)
