@@ -76,6 +76,22 @@ def add_row(sqlite_url, voicemail: Voicemail) -> None:
         conn.commit()
     finally:
         conn.close()
+        
+def edit_row_unread(sqlite_url, voicemail: Voicemail) -> None:
+    """
+    Sets unread = 0 for the row whose id matches voicemail.id.
+    Returns True if a row was updated, False if no matching id.
+    """
+    conn = get_conn(sqlite_url)
+    try:
+        cur = conn.execute(
+            "UPDATE voicemails SET unread = 0 WHERE id = ?;",
+            (voicemail.id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0  # True if an update happened
+    finally:
+        conn.close()
 
 
 def add_object_row(sqlite_url, voicemail: List[Voicemail]):
@@ -120,6 +136,7 @@ def get_recording(sqlite_url, voicemail_id: int) -> bytes | None:
         )
         row = cursor.fetchone()
         if row:
+            
             return row[0]
             #bytes_to_wav(row[0], f'../output_recordings/{voicemail_id}.wav', 1, 2, 8000) 
     finally:
