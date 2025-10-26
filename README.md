@@ -1,22 +1,12 @@
 ﻿# HiggsReceptionist — AI Call Screener & Message Manager# HiggsReceptionist — AI Call Screener & Message Manager
 
-
-
 A voice-first AI receptionist that answers your phone line, **talks** to callers in real-time, screens spam calls, **forwards legitimate calls** to your personal phone, and **saves complete call transcripts** with AI-generated summaries to a cloud database. View all messages in a React Native mobile app.A voice-first AI receptionist that answers your phone line, **talks** to callers in real-time, screens spam calls, **forwards legitimate calls** to your personal phone, and **saves complete call transcripts** with AI-generated summaries to a cloud database. View all messages in a React Native mobile app.
-
-
 
 Built with **BosonAI Higgs models** for audio understanding and generation, deployed via Twilio Media Streams.Built with **BosonAI Higgs models** for audio understanding and generation, deployed via Twilio Media Streams.
 
-
-
-------
-
-
+---
 
 ## Features## Features
-
-
 
 - **Natural voice conversations** - No key presses, just talk- **Natural voice conversations** - No key presses, just talk
 
@@ -36,17 +26,11 @@ Built with **BosonAI Higgs models** for audio understanding and generation, depl
 
 - **Voice Activity Detection** - Intelligent conversation turn-taking with VAD- **Voice Activity Detection** - Intelligent conversation turn-taking with VAD
 
-
-
-------
-
-
+---
 
 ## Architecture## Architecture
 
-
-
-``````
+```
 
 Caller (PSTN)Caller (PSTN)
 
@@ -98,21 +82,13 @@ Twilio Phone NumberTwilio Phone Number
 
                                      (Message inbox)                                     (Message inbox)
 
-``````
+```
 
-
-
-------
-
-
+---
 
 ## Tech Stack## Tech Stack
 
-
-
 ### Backend### Backend
-
-
 
 - **Python FastAPI** - WebSocket server for Twilio Media Streams- **Python FastAPI** - WebSocket server for Twilio Media Streams
 
@@ -126,11 +102,7 @@ Twilio Phone NumberTwilio Phone Number
 
 - **Twilio REST API** - Call forwarding and termination- **Twilio REST API** - Call forwarding and termination
 
-
-
 ### Frontend### Frontend
-
-
 
 - **React Native (Expo)** - Cross-platform mobile app- **React Native (Expo)** - Cross-platform mobile app
 
@@ -138,11 +110,7 @@ Twilio Phone NumberTwilio Phone Number
 
 - **NativeWind/Tailwind** - Styling- **NativeWind/Tailwind** - Styling
 
-
-
 ### Audio Processing### Audio Processing
-
-
 
 - **u-law to PCM conversion** - Twilio (8kHz) to BosonAI (16kHz/24kHz)- **u-law to PCM conversion** - Twilio (8kHz) to BosonAI (16kHz/24kHz)
 
@@ -150,19 +118,11 @@ Twilio Phone NumberTwilio Phone Number
 
 - **Sample rate conversion** - Automatic audio format adaptation- **Sample rate conversion** - Automatic audio format adaptation
 
-
-
-------
-
-
+---
 
 ## Getting Started## Getting Started
 
-
-
 ### Prerequisites### Prerequisites
-
-
 
 - Python 3.11+- Python 3.11+
 
@@ -176,15 +136,11 @@ Twilio Phone NumberTwilio Phone Number
 
 - ngrok (for local development)- ngrok (for local development)
 
-
-
 ### Backend Setup### Backend Setup
-
-
 
 1. **Install Python dependencies:**1. **Install Python dependencies:**
 
-   ```bash   \\\ash
+   ````bash \\ash
 
    cd backend   cd backend
 
@@ -196,11 +152,11 @@ Twilio Phone NumberTwilio Phone Number
 
    ```   \\\
 
-
+   ````
 
 2. **Configure environment variables in `backend/.env`:**2. **Configure environment variables in \ackend/.env\:**
 
-   ```bash   \\\ash
+   ````bash \\ash
 
    TWILIO_ACCOUNT_SID=ACxxxxxxxxxx   TWILIO_ACCOUNT_SID=ACxxxxxxxxxx
 
@@ -220,11 +176,11 @@ Twilio Phone NumberTwilio Phone Number
 
    ```   \\\
 
-
+   ````
 
 3. **Start servers:**3. **Start servers:**
 
-   ```bash   \\\ash
+   ```bash \\ash
 
    # Terminal 1: Main server (port 8080)
 
@@ -250,21 +206,21 @@ Twilio Phone NumberTwilio Phone Number
 
 4. **Configure Twilio webhook:**
 
-   - Go to Twilio Console > Phone Numbers > Your Number   ngrok http 8080
+   - Go to Twilio Console > Phone Numbers > Your Number ngrok http 8080
 
-   - Set **Voice & Fax** > **A CALL COMES IN** > **Webhook**   \\\
+   - Set **Voice & Fax** > **A CALL COMES IN** > **Webhook** \\\
 
    - URL: `https://your-ngrok-url.ngrok-free.dev/twiml` (POST)
 
-4. **Configure Twilio webhook:**
+5. **Configure Twilio webhook:**
 
-### Frontend Setup   - Go to Twilio Console Phone Numbers Your Number
+### Frontend Setup - Go to Twilio Console Phone Numbers Your Number
 
-   - Set **Voice & Fax** **A CALL COMES IN** **Webhook**
+- Set **Voice & Fax** **A CALL COMES IN** **Webhook**
 
-1. **Install and configure:**   - URL: \https://your-ngrok-url.ngrok-free.dev/twiml\ (POST)
+1. **Install and configure:** - URL: \https://your-ngrok-url.ngrok-free.dev/twiml\ (POST)
 
-   ```bash
+   ````bash
 
    cd frontend### Frontend Setup
 
@@ -277,14 +233,13 @@ Twilio Phone NumberTwilio Phone Number
    ```   cd frontend
 
    npm install
+   ````
 
----   # Edit api.js - set baseURL to your computer's IP: http://YOUR_IP:8000
+--- # Edit api.js - set baseURL to your computer's IP: http://YOUR_IP:8000
 
-   npx expo start
+npx expo start
 
-## How It Works   \\\
-
-
+## How It Works \\\
 
 1. **Caller dials your Twilio number**---
 
@@ -300,19 +255,19 @@ Twilio Phone NumberTwilio Phone Number
 
 5. **Call saved to database** with:3. **Smart decision making:**
 
-   - Caller info (number, extracted name)   - **Legitimate caller** Forwards to your personal phone
+   - Caller info (number, extracted name) - **Legitimate caller** Forwards to your personal phone
 
-   - AI-generated summary from full conversation transcript   - **Spam detected** Politely ends call
+   - AI-generated summary from full conversation transcript - **Spam detected** Politely ends call
 
    - Spam classification4. **Call saved to database** with:
 
-   - Complete WAV recording   - Caller info (number, extracted name)
+   - Complete WAV recording - Caller info (number, extracted name)
 
-6. **View in mobile app** - All calls with summaries available in React Native inbox   - AI-generated description/summary
+6. **View in mobile app** - All calls with summaries available in React Native inbox - AI-generated description/summary
 
    - Spam classification
 
----   - Full WAV recording
+--- - Full WAV recording
 
 5. **View in mobile app** - All calls available in React Native inbox
 
@@ -364,7 +319,7 @@ Twilio Phone NumberTwilio Phone Number
 
 ## Author
 
-*Built for the BosonAI Higgs Hackathon 2025*
+_Built for the BosonAI Higgs Hackathon 2025_
 
 **Kevin Peng** - [GitHub](https://github.com/pengkev)
 
