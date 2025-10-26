@@ -2,7 +2,12 @@ import sqlitecloud
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List
-from wav_bytes import wav_to_bytes, bytes_to_wav
+
+# Use try/except to support both direct execution and package import
+try:
+    from .wav_bytes import wav_to_bytes, bytes_to_wav
+except ImportError:
+    from wav_bytes import wav_to_bytes, bytes_to_wav
 
 
 @dataclass
@@ -54,9 +59,34 @@ def add_row(sqlite_url, voicemail: Voicemail) -> None:
     Adds a sample row to the voicemails table.
     """
     conn = get_conn(sqlite_url)
-    recording = wav_to_bytes(f"../recordings/{voicemail.recording}")
+    
+    # Build the full path to the recording file
+    import os
+    # Get the backend directory (parent of database directory)
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    recording_path = os.path.join(backend_dir, "recordings", voicemail.recording)
+    
+    print(f"[DB] Backend directory: {backend_dir}")
+    print(f"[DB] Attempting to read recording file: {recording_path}")
+    
+    # Check if file exists
+    if not os.path.exists(recording_path):
+        print(f"[DB] ERROR: Recording file not found: {recording_path}")
+        raise FileNotFoundError(f"Recording file not found: {recording_path}")
+    
+    try:
+        recording = wav_to_bytes(recording_path)
+        if recording is None:
+            raise ValueError("wav_to_bytes returned None - file read failed")
+        print(f"[DB] Successfully read {len(recording)} bytes from recording file")
+    except Exception as e:
+        print(f"[DB] ERROR reading recording file: {e}")
+        raise
+    
     try:
         id = conn.execute("SELECT COUNT(*) FROM voicemails;").fetchone()[0] + 1
+        print(f"[DB] Inserting voicemail with ID {id}")
+        
         conn.execute(
             """
         INSERT INTO voicemails (id, number, name, description, spam, date, unread, recording)
@@ -74,6 +104,28 @@ def add_row(sqlite_url, voicemail: Voicemail) -> None:
             ),
         )
         conn.commit()
+        print(f"[DB] ✅ Successfully saved voicemail ID {id} to database")
+    except Exception as e:
+        print(f"[DB] ❌ ERROR saving to database: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        conn.close()
+        
+def edit_row_unread(sqlite_url, voicemail: Voicemail) -> None:
+    """
+    Sets unread = 0 for the row whose id matches voicemail.id.
+    Returns True if a row was updated, False if no matching id.
+    """
+    conn = get_conn(sqlite_url)
+    try:
+        cur = conn.execute(
+            "UPDATE voicemails SET unread = 0 WHERE id = ?;",
+            (voicemail.id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0  # True if an update happened
     finally:
         conn.close()
 
@@ -120,7 +172,9 @@ def get_recording(sqlite_url, voicemail_id: int) -> bytes | None:
         )
         row = cursor.fetchone()
         if row:
-            bytes_to_wav(row[0], f'{voicemail_id}.wav', 1, 2, 8000) 
+            
+            return row[0]
+            #bytes_to_wav(row[0], f'../output_recordings/{voicemail_id}.wav', 1, 2, 8000) 
     finally:
         conn.close()
 

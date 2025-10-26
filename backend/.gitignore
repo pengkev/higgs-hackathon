@@ -35,6 +35,7 @@ wheels/
 
 # Recordings
 recordings/
+output_recordings/
 *.mp3
 *.wav
 

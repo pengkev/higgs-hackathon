@@ -1,9 +1,10 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import Response
+from fastapi.middleware.cors import CORSMiddleware
 import json
 import base64
 import uvicorn
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import re
 import audioop
@@ -13,7 +14,22 @@ import openai
 from dotenv import load_dotenv
 from gcal import get_current_event, book_next_available
 
+# Import database functions
+from database.db_actions import init_db, add_row, Voicemail
+
 load_dotenv()
+
+# Initialize database
+SQLITE_URL = os.getenv("SQLITECLOUD_URL")
+if SQLITE_URL:
+    try:
+        init_db(SQLITE_URL)
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"⚠️ Database initialization failed: {e}")
+        SQLITE_URL = None
+else:
+    print("⚠️ SQLITECLOUD_URL not set - database features disabled")
 
 HTTP_SERVER_PORT = 8080
 RECORDINGS_DIR = "recordings"
@@ -65,6 +81,14 @@ if not boson_clients and os.getenv("BOSONAI_API_KEY"):
         base_url="https://hackathon.boson.ai/v1"
     ))
     log("Loaded BosonAI API key (legacy)")
+# Add CORS middleware to allow frontend to access the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Keep single client reference for backward compatibility
 boson_client = boson_clients[0] if boson_clients else None
@@ -283,6 +307,117 @@ def save_transcript(call_sid: str, from_number: str, conversation_log: list, cal
         log(f"Error saving transcript: {e}")
         import traceback
         traceback.print_exc()
+
+# Initialize BosonAI clients with multiple API keys for cycling
+boson_clients = []
+boson_api_keys = []
+
+# Load all available API keys (BOSONAI_API_KEY1, BOSONAI_API_KEY2, BOSONAI_API_KEY3)
+for i in range(1, 6):
+    api_key = os.getenv(f"BOSONAI_API_KEY{i}")
+    if api_key:
+        boson_api_keys.append(api_key)
+        boson_clients.append(openai.Client(
+            api_key=api_key,
+            base_url="https://hackathon.boson.ai/v1"
+        ))
+        log(f"Loaded BosonAI API key #{i}")
+
+# Fallback to single BOSONAI_API_KEY if numbered keys not found
+if not boson_clients and os.getenv("BOSONAI_API_KEY"):
+    boson_api_keys.append(os.getenv("BOSONAI_API_KEY"))
+    boson_clients.append(openai.Client(
+        api_key=os.getenv("BOSONAI_API_KEY"),
+        base_url="https://hackathon.boson.ai/v1"
+    ))
+    log("Loaded BosonAI API key (legacy)")
+
+# Keep single client reference for backward compatibility
+boson_client = boson_clients[0] if boson_clients else None
+
+# API key cycling state
+current_key_index = 0
+API_REQUEST_TIMEOUT = 10.0  # seconds - timeout for BosonAI requests
+
+# Lock to ensure sequential API calls within same conversation turn
+import asyncio
+api_call_lock = asyncio.Lock()
+
+
+async def call_bosonai_with_retry(func_name: str, use_lock: bool = True, **kwargs):
+    """
+    Call a BosonAI function with automatic key cycling on timeout.
+    Tries each available API key in sequence until one succeeds or all fail.
+    
+    Args:
+        func_name: Name of the function to call (e.g., 'chat.completions.create', 'audio.speech.create')
+        use_lock: Whether to use the lock to ensure sequential calls (default: True)
+        **kwargs: Arguments to pass to the BosonAI function
+    
+    Returns:
+        The response from BosonAI, or None if all keys fail
+    """
+    global current_key_index
+    
+    if not boson_clients:
+        log("[BosonAI not configured - set BOSONAI_API_KEY1/2/3 env vars]")
+        return None
+    
+    import asyncio
+    
+    # Use lock to ensure sequential calls within same conversation turn use same API key
+    async def _make_call():
+        global current_key_index
+        
+        # Try each API key in sequence
+        num_keys = len(boson_clients)
+        for attempt in range(num_keys):
+            key_idx = (current_key_index + attempt) % num_keys
+            client = boson_clients[key_idx]
+            
+            try:
+                log(f"Attempting BosonAI call with API key #{key_idx + 1} (timeout: {API_REQUEST_TIMEOUT}s)...")
+                
+                # Parse the function path (e.g., "chat.completions.create" -> client.chat.completions.create)
+                func = client
+                for part in func_name.split('.'):
+                    func = getattr(func, part)
+                
+                # Call the function with timeout
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(func, **kwargs),
+                    timeout=API_REQUEST_TIMEOUT
+                )
+                
+                # Success! Update current key index for next call
+                if key_idx != current_key_index:
+                    log(f"✅ Switched to API key #{key_idx + 1} successfully")
+                    current_key_index = key_idx
+                
+                return response
+                
+            except asyncio.TimeoutError:
+                log(f"⏱️ API key #{key_idx + 1} timed out after {API_REQUEST_TIMEOUT}s")
+                if attempt < num_keys - 1:
+                    log(f"🔄 Trying next API key...")
+                continue
+                
+            except Exception as e:
+                log(f"❌ API key #{key_idx + 1} failed: {e}")
+                if attempt < num_keys - 1:
+                    log(f"🔄 Trying next API key...")
+                continue
+        
+        # All keys failed
+        log(f"❌ All {num_keys} API keys failed")
+        return None
+    
+    # Execute with or without lock
+    if use_lock:
+        async with api_call_lock:
+            return await _make_call()
+    else:
+        return await _make_call()
 
 
 def mulaw8k_to_pcm16_16k(mulaw_bytes: bytes) -> bytes:
@@ -646,7 +781,7 @@ CRITICAL REMINDERS:
             "chat.completions.create",
             model="Qwen3-14B-Hackathon",  # Use text model instead of audio understanding
             messages=messages,
-            temperature=0.7,
+            temperature=0.2,
         )
         
         if not response:
@@ -972,6 +1107,126 @@ async def end_call(call_sid: str):
         log(f"Error ending call: {e}")
 
 
+async def save_call_to_database(
+    call_sid: str,
+    from_number: str,
+    conversation_log: list,
+    transcripts: list,
+    recording_filename: str,
+    is_spam: bool
+):
+    """
+    Save call information to the SQLiteCloud database.
+    
+    Args:
+        call_sid: Twilio call SID
+        from_number: Caller's phone number
+        conversation_log: List of conversation exchanges
+        transcripts: List of bot responses
+        recording_filename: Path to the WAV recording file
+        is_spam: Whether the call was identified as spam
+    """
+    log(f"[SAVE] Starting database save for call {call_sid}")
+    log(f"[SAVE] Recording filename: {recording_filename}")
+    log(f"[SAVE] From number: {from_number}")
+    log(f"[SAVE] Is spam: {is_spam}")
+    
+    if not SQLITE_URL:
+        log("⚠️ Database not configured - skipping save")
+        return
+    
+    try:
+        # Extract caller name and call description from conversation
+        caller_name = "Unknown Caller"
+        description = "No conversation"
+        
+        # Try to extract name from bot responses
+        for entry in conversation_log:
+            if entry.get('speaker') == 'Bot':
+                text = entry.get('text', '')
+                # Look for patterns like "Thank you [Name]" or "Hi [Name]"
+                if 'thank you' in text.lower() or 'thanks' in text.lower() or 'hi ' in text.lower():
+                    words = text.split()
+                    for i, word in enumerate(words):
+                        if word.lower() in ['thank', 'thanks', 'hi', 'hello'] and i + 1 < len(words):
+                            potential_name = words[i + 1].strip('.,!?')
+                            if potential_name and potential_name[0].isupper() and len(potential_name) > 1:
+                                caller_name = potential_name
+                                log(f"[SAVE] Extracted caller name: {caller_name}")
+                                break
+        
+        # Create a concise, high-level description
+        if is_spam:
+            # For spam calls, create a short description
+            spam_types = {
+                'warranty': 'Car warranty scam',
+                'irs': 'IRS scam call',
+                'microsoft': 'Tech support scam',
+                'computer': 'Tech support scam',
+                'student loan': 'Student loan scam',
+                'credit card': 'Credit card offer',
+                'vacation': 'Vacation scam',
+                'prize': 'Prize scam',
+                'social security': 'Social Security scam'
+            }
+            
+            # Check transcripts for spam keywords
+            description = "Spam call"
+            if transcripts:
+                transcript_text = ' '.join(transcripts).lower()
+                for keyword, desc in spam_types.items():
+                    if keyword in transcript_text:
+                        description = desc
+                        break
+        else:
+            # For legitimate calls, extract the main topic
+            if transcripts and len(transcripts) > 0:
+                # Get the caller's stated purpose from the conversation
+                first_response = transcripts[0].replace("FORWARD_CALL", "").replace("END_CALL", "").strip()
+                
+                # Extract key phrases
+                if 'hackathon' in first_response.lower():
+                    description = "Hackathon related inquiry"
+                elif 'project' in first_response.lower():
+                    description = "Project discussion"
+                elif 'meeting' in first_response.lower():
+                    description = "Meeting request"
+                elif 'interview' in first_response.lower():
+                    description = "Interview scheduled"
+                else:
+                    # Take first sentence as description (limit to 60 chars)
+                    sentences = first_response.split('.')
+                    if sentences:
+                        description = sentences[0].strip()
+                        if len(description) > 60:
+                            description = description[:60] + "..."
+        
+        log(f"[SAVE] Caller: {caller_name}")
+        log(f"[SAVE] Description: {description}")
+        
+        # Create Voicemail object
+        voicemail = Voicemail(
+            id=0,  # Will be auto-generated by database
+            number=from_number if from_number and from_number != 'unknown' and from_number != 'Unknown' else 'Unknown Number',
+            name=caller_name,
+            description=description,
+            spam=is_spam,
+            date=datetime.now(timezone.utc),
+            unread=True,
+            recording=recording_filename
+        )
+        
+        log(f"[SAVE] Calling add_row() to save to database...")
+        # Save to database
+        add_row(SQLITE_URL, voicemail)
+        log(f"✅ Call saved to database: {caller_name} ({from_number}) - Spam: {is_spam}")
+        
+    except Exception as e:
+        log(f"❌ Failed to save call to database: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 class VadProcessor:
     """Handles VAD-based speech segmentation for endpointing."""
     
@@ -1030,11 +1285,11 @@ async def return_twiml(request: Request):
     host = request.headers.get('host', f'localhost:{HTTP_SERVER_PORT}')
     protocol = 'wss' if request.url.scheme == 'https' else 'ws'
     
-    # Use <Connect> with INBOUND ONLY streaming to prevent echo
+    # Use <Connect> with BIDIRECTIONAL streaming (both_tracks) to allow bot to speak
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{protocol}://{host}/media-stream" track="inbound_track" />
+        <Stream url="{protocol}://{host}/media-stream" />
     </Connect>
 </Response>"""
     
@@ -1043,7 +1298,7 @@ async def return_twiml(request: Request):
 
 async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
     """Send initial greeting when call starts."""
-    if not boson_client:
+    if not boson_clients:
         return
     
     try:
@@ -1064,8 +1319,8 @@ async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
         )
         
         if not speech_response:
-            log("Failed to generate greeting speech from BosonAI (all API keys failed or timed out)")
-            return  # Cannot proceed without greeting
+            log("Failed to generate greeting from BosonAI (all API keys failed or timed out)")
+            return None
         
         pcm_data = speech_response.content
         log(f"Received {len(pcm_data)} bytes of PCM audio for greeting")
@@ -1153,6 +1408,7 @@ async def media_stream(websocket: WebSocket):
         
         # Set flag to disable VAD during bot response
         bot_is_speaking = True
+        bot_finished_time = None  # Clear debounce timer during processing
         
         # Clear VAD buffer immediately to prevent echo detection
         buf_pcm16_8k.clear()
@@ -1192,7 +1448,7 @@ async def media_stream(websocket: WebSocket):
                 bot_speaking_until = datetime.now() + timedelta(seconds=delay_seconds)
                 log(f"🔇 Blocking user input until {bot_speaking_until.strftime('%H:%M:%S.%f')[:-3]} ({delay_seconds:.2f}s from now)")
         else:
-            log("Warning: stream_sid not set yet, skipping utterance")
+            log("Warning: stream_sid or call_sid not set yet, skipping utterance")
         
         # Re-enable VAD immediately (timestamp check handles blocking)
         bot_is_speaking = False
@@ -1243,6 +1499,7 @@ async def media_stream(websocket: WebSocket):
                 # Create WAV file for this call (8 kHz native PSTN rate)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"{RECORDINGS_DIR}/call_{call_sid}_{timestamp}.wav"
+                recording_filename = f"call_{call_sid}_{timestamp}.wav"  # Store just the filename
                 
                 # Open WAV file with proper settings for mulaw -> PCM conversion
                 wav_file = wave.open(filename, 'wb')
@@ -1255,15 +1512,29 @@ async def media_stream(websocket: WebSocket):
                 log(f"BosonAI bot ready")
             
             elif data['event'] == "media":
-                # Skip all media processing if bot is speaking (includes greeting)
+                # Always write to WAV for complete recording
+                payload = data['media']['payload']
+                mulaw_data = base64.b64decode(payload)
+                if wav_file:
+                    pcm_data = audioop.ulaw2lin(mulaw_data, 2)
+                    wav_file.writeframes(pcm_data)
+                
+                # Skip VAD processing if bot is speaking (but keep recording above)
                 if bot_is_speaking:
-                    # Still write to WAV for complete recording, but don't process for VAD
-                    payload = data['media']['payload']
-                    mulaw_data = base64.b64decode(payload)
-                    if wav_file:
-                        pcm_data = audioop.ulaw2lin(mulaw_data, 2)
-                        wav_file.writeframes(pcm_data)
                     continue
+                
+                # Check debounce period - skip VAD immediately after bot finishes speaking
+                if bot_finished_time is not None:
+                    import time
+                    time_since_bot_finished = time.time() - bot_finished_time
+                    if time_since_bot_finished < DEBOUNCE_SECONDS:
+                        # Still in debounce period - skip VAD processing
+                        continue
+                    else:
+                        # Debounce period over - clear the timer and resume normal processing
+                        if bot_finished_time is not None:  # Only log once
+                            log("Debounce period over - resuming VAD")
+                            bot_finished_time = None
                 
                 if not has_seen_media:
                     log("Media message received - streaming audio with VAD...")
@@ -1331,6 +1602,7 @@ async def media_stream(websocket: WebSocket):
                     continue
                 
                 # Add to buffer and process in 20ms frames (160 bytes μ-law)
+                # (mulaw_data already extracted at top of media event handler)
                 mulaw_buffer.extend(mulaw_data)
                 
                 # Process complete 20ms frames for VAD
@@ -1395,6 +1667,25 @@ async def media_stream(websocket: WebSocket):
         # Save final transcript to file (mark as complete)
         if conversation_log and call_sid:
             save_transcript(call_sid, from_number, conversation_log, call_start_time, call_end_time, final_action, call_in_progress=False)
+        # Determine if call was spam based on conversation
+        is_spam = False
+        for entry in conversation_log:
+            if entry.get('speaker') == 'Bot':
+                text = entry.get('text', '').lower()
+                if 'spam' in text or 'end_call' in text or 'scam' in text:
+                    is_spam = True
+                    break
+        
+        # Save call to database
+        if call_sid and recording_filename:
+            await save_call_to_database(
+                call_sid=call_sid,
+                from_number=from_number,
+                conversation_log=conversation_log,
+                transcripts=transcripts,
+                recording_filename=recording_filename,
+                is_spam=is_spam
+            )
         
         # Log full conversation
         if conversation_log:
@@ -1433,83 +1724,68 @@ async def root():
         "endpoints": {
             "twiml": "/twiml (POST)",
             "websocket": "/media-stream (WebSocket)",
-            "call_info": "/call/{call_sid} (GET)",
-            "calls": "/calls (GET)"
-        }
+            "voicemails": "/voicemails (GET)",
+            "voicemail_recording": "/voicemail/{id}/recording (GET)"
+        },
+        "database": "enabled" if SQLITE_URL else "disabled"
     }
 
 
-@app.get("/call/{call_sid}")
-async def get_call(call_sid: str):
-    """
-    Get detailed information about a specific call.
+@app.get("/voicemails")
+async def get_voicemails():
+    """Retrieve all voicemails from the database"""
+    log("[API] GET /voicemails - Fetching voicemails from database")
     
-    Returns:
-        Call information including AI-generated summary, transcript, and recording paths
-    """
-    call_info = await get_call_info(call_sid)
-    
-    if not call_info:
-        return {
-            "error": "Call not found",
-            "call_sid": call_sid
-        }
-    
-    # Convert datetime to ISO string for JSON serialization
-    if call_info.get('date'):
-        call_info['date'] = call_info['date'].isoformat()
-    
-    return call_info
-
-
-@app.get("/calls")
-async def list_calls():
-    """
-    List all available calls with their information.
-    
-    Returns:
-        List of call information dictionaries
-    """
-    import glob
-    import json as json_module
+    if not SQLITE_URL:
+        log("[API] ERROR: Database not configured")
+        return {"error": "Database not configured"}
     
     try:
-        # Find all transcript files
-        transcript_files = glob.glob(f"{TRANSCRIPTS_DIR}/transcript_*.json")
+        from database.db_actions import read_table
+        voicemails = read_table(SQLITE_URL)
         
-        calls = []
-        for transcript_path in sorted(transcript_files, reverse=True):  # Most recent first
-            # Extract call_sid from filename
-            # Format: transcript_{call_sid}_{timestamp}.json
-            import re
-            match = re.search(r'transcript_([^_]+)_', transcript_path)
-            if match:
-                call_sid = match.group(1)
-                call_info = await get_call_info(call_sid)
-                if call_info:
-                    # Convert datetime to ISO string
-                    if call_info.get('date'):
-                        call_info['date'] = call_info['date'].isoformat()
-                    calls.append(call_info)
+        log(f"[API] Retrieved {len(voicemails)} voicemails from database")
         
-        return {
-            "total": len(calls),
-            "calls": calls
-        }
+        # Convert to JSON-serializable format
+        result = []
+        for vm in voicemails:
+            result.append({
+                "id": vm.id,
+                "number": vm.number,
+                "name": vm.name,
+                "description": vm.description,
+                "spam": vm.spam,
+                "date": vm.date.isoformat(),
+                "unread": vm.unread,
+                "recording": vm.recording
+            })
         
+        log(f"[API] Returning {len(result)} voicemails to frontend")
+        return {"voicemails": result, "count": len(result)}
     except Exception as e:
-        log(f"Error listing calls: {e}")
-        return {
-            "error": str(e),
-            "calls": []
-        }
+        log(f"[API] ERROR fetching voicemails: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
 
 
-@app.post("/")
-async def root_post(request: Request):
-    """Handle POST requests to root - redirect to /twiml"""
-    log("POST request to / - redirecting to /twiml handler")
-    return await return_twiml(request)
+@app.get("/voicemail/{voicemail_id}/recording")
+async def get_voicemail_recording(voicemail_id: int):
+    """Get the audio recording for a specific voicemail"""
+    if not SQLITE_URL:
+        return {"error": "Database not configured"}
+    
+    try:
+        from database.db_actions import get_recording
+        recording_bytes = get_recording(SQLITE_URL, voicemail_id)
+        
+        if recording_bytes:
+            from fastapi.responses import Response
+            return Response(content=recording_bytes, media_type="audio/wav")
+        else:
+            return {"error": "Recording not found"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 if __name__ == '__main__':
