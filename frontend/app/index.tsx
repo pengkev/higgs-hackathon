@@ -1,7 +1,7 @@
 import "../global.css";
 import api from "../api.js";
 import { Buffer } from "buffer";
-
+import  AudioOverlay  from "./play";
 import { useState, useEffect } from "react";
 import {
   View,
@@ -42,12 +42,9 @@ export default function VoicemailTab() {
 
       setVoicemails((curr) =>
         curr.map((v) => (v.id === item.id ? { ...v, unread: false } : v))
-      );
+      );  
       const base64 = Buffer.from(res.data, "binary").toString("base64");
-      const audioMimeType = "audio/wav";
-      const audio = new Audio();
-      audio.src = `data:${audioMimeType};base64,${base64}`;
-      audio.play();
+     
       return base64;
 
 
@@ -131,10 +128,6 @@ export default function VoicemailTab() {
           const base64 = await handleRecording({ item }); 
           setRecording(base64 || null);
           setModal(true);
-
-
-          // e.g. open your modal player here
-          // setActive({ visible: true, base64, filename: `${item.id}.wav` });
         } catch (e) {
           console.error(e);
         }
@@ -172,7 +165,7 @@ export default function VoicemailTab() {
   return (
     <View className="flex-1 bg-gray-100 dark:bg-black">
       <TextInput
-        className="bg-white p-3 mt-10 m-3 rounded-lg text-base"
+        className="bg-white border border-black p-3 mt-10 m-3 rounded-lg text-base"
         placeholder="Search voicemails..."
         value={search}
         onChangeText={handleSearch}
@@ -202,6 +195,16 @@ export default function VoicemailTab() {
         keyExtractor={(item) => item.id}
         contentContainerStyle={{ paddingBottom: 20 }}
       />
+      {modal && recording && (
+        <AudioOverlay
+          base64={recording}
+          visible
+          onClose={() => {
+            setModal(false);
+            setRecording(null);
+          }}
+        />
+      )}
     </View>
   );
 }

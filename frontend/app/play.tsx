@@ -1,149 +1,170 @@
-// import React, { useEffect, useRef, useState } from "react";
-// import { Modal, View, Text, TouchableOpacity, ActivityIndicator } from "react-native";
-// import * as FileSystem from "expo-file-system";
-// import { Audio, AVPlaybackStatus } from "expo-av";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { MaterialIcons } from "@expo/vector-icons";
 
-// type Props = {
-//   visible: boolean;
-//   base64: string | null;
-//   filename?: string;           // e.g., "12345.wav" (defaults if omitted)
-//   onClose: () => void;
-// };
+import {
+  Pressable,
+  TouchableOpacity,
+  Text,
+  ActivityIndicator,
+  Platform,
+} from "react-native";
+import * as FileSystem from "expo-file-system/legacy";
+import { useAudioPlayer } from "expo-audio";
 
-// export default function PlayRecordingModal({ visible, base64, filename = "recording.wav", onClose }: Props) {
-//   const soundRef = useRef<Audio.Sound | null>(null);
-//   const [loading, setLoading] = useState(false);
-//   const [isPlaying, setIsPlaying] = useState(false);
+type Props = {
+  base64: string;
+  visible?: boolean;
+  onClose?: () => void;
+};
 
-//   const recordingsDir = "../output_recordings/";
-//   const fileUri = recordingsDir + filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+export default function AudioOverlay({
+  base64,
+  visible = true,
+  onClose,
+}: Props) {
+  const [uri, setUri] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(false);
 
-//   async function ensureDir() {
-//     const info = await FileSystem.getInfoAsync(recordingsDir);
-//     if (!info.exists) {
-//       await FileSystem.makeDirectoryAsync(recordingsDir, { intermediates: true });
-//     }
-//   }
+  const lastUriRef = useRef<string | null>(null);
 
+  // keep raw base64 for native FS writes
+  const strippedBase64 = useMemo(
+    () =>
+      base64 ? base64.replace(/^data:audio\/[a-zA-Z0-9.+-]+;base64,/, "") : "",
+    [base64]
+  );
 
+  // Create a playable URI from base64:
+  // - native: write a temp .wav to cacheDirectory
+  // - web: create a Blob URL
+  useEffect(() => {
+    let cancelled = false;
 
-//   async function loadAndPlay() {
-//     if (!base64) return;
-//     setLoading(true);
-//     try {
-//       await Audio.setAudioModeAsync({
-//         allowsRecordingIOS: false,
-//         playsInSilentModeIOS: true, // play even if the ringer is silent
-//         staysActiveInBackground: false,
-//         shouldDuckAndroid: true,
-//         playThroughEarpieceAndroid: false,
-//       });
+    (async () => {
+      try {
+        setLoading(true);
 
-      
+        // Cleanup previous resource
+        if (lastUriRef.current) {
+          if (Platform.OS === "web") {
+            URL.revokeObjectURL(lastUriRef.current);
+          } else {
+            try {
+              await FileSystem.deleteAsync(lastUriRef.current, {
+                idempotent: true,
+              });
+            } catch {}
+          }
+          lastUriRef.current = null;
+        }
 
-//       // Clean any previous sound
-//       if (soundRef.current) {
-//         await soundRef.current.unloadAsync();
-//         soundRef.current.setOnPlaybackStatusUpdate(null);
-//         soundRef.current = null;
-//       }
+        if (!base64) {
+          if (!cancelled) setUri(null);
+          return;
+        }
 
-//       const { sound } = await Audio.Sound.createAsync(
-//         { uri: fileUri },
-//         { shouldPlay: true }, // autostart
-//         (status: AVPlaybackStatus) => {
-//           if (!status.isLoaded) return;
-//           setIsPlaying(status.isPlaying);
-//           if (status.didJustFinish) {
-//             // Auto-close when done (optional)
-//             // onClose();
-//           }
-//         }
-//       );
+        if (Platform.OS === "web") {
+          // If a full data: URL was provided, prefer to use it directly.
+          if (base64.startsWith("data:audio/")) {
+            if (!cancelled) {
+              setUri(base64);
+              lastUriRef.current = base64; // (no revoke needed for data: URIs)
+            }
+            return;
+          }
+          // Otherwise build a Blob URL from the stripped base64
+          const byteChars = atob(strippedBase64);
+          const bytes = new Uint8Array(byteChars.length);
+          for (let i = 0; i < byteChars.length; i++)
+            bytes[i] = byteChars.charCodeAt(i);
+          const blob = new Blob([bytes], { type: "audio/wav" });
+          const url = URL.createObjectURL(blob);
+          if (!cancelled) {
+            setUri(url);
+            lastUriRef.current = url; // revoke later
+          }
+        } else {
+          // Native: write a temp file under cacheDirectory
+          const dir = FileSystem.cacheDirectory + "audio/";
+          await FileSystem.makeDirectoryAsync(dir, {
+            intermediates: true,
+          }).catch(() => {});
+          const outUri = `${dir}audio_${Date.now()}.wav`;
+          await FileSystem.writeAsStringAsync(outUri, strippedBase64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          if (!cancelled) {
+            setUri(outUri);
+            lastUriRef.current = outUri;
+          }
+        }
+      } catch (e) {
+        console.error("Failed to create WAV file/URL:", e);
+        if (!cancelled) setUri(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
 
-//       soundRef.current = sound;
-//     } catch (e) {
-//       console.warn("Audio play error:", e);
-//     } finally {
-//       setLoading(false);
-//     }
-//   }
+    return () => {
+      cancelled = true;
+    };
+  }, [base64, strippedBase64]);
 
-//   async function stopAndUnload() {
-//     try {
-//       if (soundRef.current) {
-//         const status = await soundRef.current.getStatusAsync();
-//         if (status.isLoaded && status.isPlaying) {
-//           await soundRef.current.stopAsync();
-//         }
-//         await soundRef.current.unloadAsync();
-//         soundRef.current.setOnPlaybackStatusUpdate(null);
-//         soundRef.current = null;
-//       }
-//     } catch {}
-//   }
+  // Player
+  const player = useAudioPlayer(uri ?? undefined);
 
-//   useEffect(() => {
-//     if (visible && base64) {
-//       loadAndPlay();
-//     }
-//     // Cleanup when modal hides or component unmounts
-//     return () => {
-//       stopAndUnload();
-//     };
-//     // eslint-disable-next-line react-hooks/exhaustive-deps
-//   }, [visible, base64, filename]);
+  //   // Cleanup on unmount
+  //   useEffect(() => {
+  //     return () => {
+  //       (async () => {
+  //         try { await player?.unloadAsync?.(); } catch {}
+  //         if (lastUriRef.current) {
+  //           if (Platform.OS === "web") {
+  //             if (lastUriRef.current.startsWith("blob:")) URL.revokeObjectURL(lastUriRef.current);
+  //           } else {
+  //             try { await FileSystem.deleteAsync(lastUriRef.current, { idempotent: true }); } catch {}
+  //           }
+  //           lastUriRef.current = null;
+  //         }
+  //       })();
+  //     };
+  //   }, [player]);
 
-//   const handleTogglePlay = async () => {
-//     const snd = soundRef.current;
-//     if (!snd) return;
-//     const status = await snd.getStatusAsync();
-//     if (!status.isLoaded) return;
-//     if (status.isPlaying) {
-//       await snd.pauseAsync();
-//     } else {
-//       await snd.playAsync();
-//     }
-//   };
+  if (!visible) return null;
 
-//   const handleClose = async () => {
-//     await stopAndUnload();
-//     onClose();
-//   };
+  const toggle = () => {
+    if (!player) return;
+    player.playing ? player.pause() : player.play();
+    setIsPlaying(player.playing);
+  };
 
-//   return (
-//     <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
-//       <View className="flex-1 bg-black/60 justify-center items-center px-6">
-//         <View className="w-full rounded-2xl bg-white p-5">
-//           <Text className="text-lg font-semibold mb-2">Playing Recording</Text>
-//           <Text className="text-xs text-gray-600 mb-4" numberOfLines={1}>
-//             {fileUri}
-//           </Text>
-
-//           {loading ? (
-//             <View className="flex-row items-center">
-//               <ActivityIndicator />
-//               <Text className="ml-3">Loading audio…</Text>
-//             </View>
-//           ) : (
-//             <View className="flex-row">
-//               <TouchableOpacity
-//                 onPress={handleTogglePlay}
-//                 className="flex-1 bg-black rounded-xl py-3 items-center mr-2"
-//               >
-//                 <Text className="text-white font-semibold">{isPlaying ? "Pause" : "Play"}</Text>
-//               </TouchableOpacity>
-
-//               <TouchableOpacity
-//                 onPress={handleClose}
-//                 className="flex-1 bg-gray-200 rounded-xl py-3 items-center ml-2"
-//               >
-//                 <Text className="font-semibold">Close</Text>
-//               </TouchableOpacity>
-//             </View>
-//           )}
-//         </View>
-//       </View>
-//     </Modal>
-//   );
-// }
+  return (
+    <Pressable
+      className="absolute inset-0 z-[9999] items-center justify-center bg-black/70"
+      onPress={onClose}
+    >
+      {loading ? (
+        <ActivityIndicator size="large" />
+      ) : (
+        // stop propagation so clicking the button doesn’t close the overlay
+        <TouchableOpacity
+          activeOpacity={0.8}
+          className="w-24 h-24 rounded-full bg-white items-center justify-center shadow"
+          onPress={(e) => {
+            e.stopPropagation();
+            toggle();
+          }}
+          disabled={!uri}
+        >
+          <MaterialIcons
+            name={isPlaying ? "pause" : "play-arrow"}
+            size={48}
+            color="black"
+          />
+        </TouchableOpacity>
+      )}
+    </Pressable>
+  );
+}
