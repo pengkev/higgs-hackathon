@@ -1,0 +1,20 @@
+CALL TRANSCRIPT
+============================================================
+Call ID: CAfc1b3487452288e4584f2f972062e8aa
+From: unknown
+Start: 2025-10-26 10:30:17
+End: 2025-10-26 10:31:43
+Duration: 85.6 seconds
+Result: Forwarded to Kevin
+============================================================
+
+[1] AI RECEPTIONIST: Hi, you've reached the office of kevin. How can I help you today?
+
+[2] CALLER: hello i'd like to schedule a meeting with kevin regarding a job interview
+
+[3] AI RECEPTIONIST: May I ask who's calling and what company you're interviewing with? MORE_INFO
+
+[4] CALLER: yes this is mark from nvidia university recruiting i like to speak with kevin regarding f p g a row at our company
+
+[5] AI RECEPTIONIST: Thanks for calling, Mark. Let me connect you with Kevin right now. FORWARD_CALL
+
