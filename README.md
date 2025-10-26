@@ -1,4 +1,4 @@
-﻿# HiggsReceptionist — AI Call Screener & Message Manager
+﻿# HiggsCeptionist — AI Call Screener & Message Manager
 
 A voice-first AI receptionist that answers your phone line, **talks** to callers in real time, screens spam, **forwards legitimate calls** to your personal phone, and **saves call summaries + recordings** to a cloud database. A lightweight React Native app shows your inbox.
 
@@ -8,15 +8,15 @@ Built with **BosonAI Higgs** audio models over **Twilio Media Streams**, a **Fas
 
 ## Features
 
-* **Natural voice conversations** — no IVR menus, just talk.
-* **Real-time AI screening** — understands intent during the call.
-* **Smart spam detection** — auto-flags/ends obvious scams.
-* **Call forwarding** — legit callers are connected to your phone.
-* **Google Calendar aware** — routes based on availability; can book meetings.
-* **AI summaries & transcripts** — saved with the call record.
-* **Full recordings** — WAV saved, referenced from the DB.
-* **Multi-API-key failover** — rotate up to 5 BosonAI keys.
-* **Voice Activity Detection (VAD)** — smooth turn-taking.
+- **Natural voice conversations** — no IVR menus, just talk.
+- **Real-time AI screening** — understands intent during the call.
+- **Smart spam detection** — auto-flags/ends obvious scams.
+- **Call forwarding** — legit callers are connected to your phone.
+- **Google Calendar aware** — routes based on availability; can book meetings.
+- **AI summaries & transcripts** — saved with the call record.
+- **Full recordings** — WAV saved, referenced from the DB.
+- **Multi-API-key failover** — rotate up to 5 BosonAI keys.
+- **Voice Activity Detection (VAD)** — smooth turn-taking.
 
 ---
 
@@ -53,23 +53,23 @@ Twilio Phone Number
 
 **Backend**
 
-* Python **FastAPI** (WebSocket server for Media Streams)
-* **BosonAI Higgs** (audio understanding & TTS via OpenAI client)
-* **WebRTC VAD** for endpointing
-* **Twilio Programmable Voice** + REST API
-* **SQLiteCloud** for call records
-* **Google Calendar API** for availability & booking
+- Python **FastAPI** (WebSocket server for Media Streams)
+- **BosonAI Higgs** (audio understanding & TTS via OpenAI client)
+- **WebRTC VAD** for endpointing
+- **Twilio Programmable Voice** + REST API
+- **SQLiteCloud** for call records
+- **Google Calendar API** for availability & booking
 
 **Frontend**
 
-* **React Native (Expo)**
-* **Axios** for API calls
-* **NativeWind/Tailwind** for styling
+- **React Native (Expo)**
+- **Axios** for API calls
+- **NativeWind/Tailwind** for styling
 
 **Audio**
 
-* μ-law ↔ PCM conversion (8 kHz Twilio ↔ 16/24 kHz models)
-* WAV file generation and sample-rate conversion
+- μ-law ↔ PCM conversion (8 kHz Twilio ↔ 16/24 kHz models)
+- WAV file generation and sample-rate conversion
 
 ---
 
@@ -77,13 +77,13 @@ Twilio Phone Number
 
 ### Prerequisites
 
-* Python 3.11+
-* Node.js 18+
-* Twilio account & phone number
-* BosonAI API key(s)
-* SQLiteCloud account
-* Google Cloud project (Calendar API)
-* **ngrok** (for local dev tunneling)
+- Python 3.11+
+- Node.js 18+
+- Twilio account & phone number
+- BosonAI API key(s)
+- SQLiteCloud account
+- Google Cloud project (Calendar API)
+- **ngrok** (for local dev tunneling)
 
 ### Backend Setup
 
@@ -124,9 +124,9 @@ PUBLIC_BASE_URL=your-subdomain.ngrok-free.dev
 
 3. **Google Calendar (first-time auth)**
 
-* Enable **Google Calendar API** in Google Cloud.
-* Create **OAuth 2.0 Desktop** credentials, download JSON to `backend/google-calendar-credentials.json`.
-* Run first-time flow:
+- Enable **Google Calendar API** in Google Cloud.
+- Create **OAuth 2.0 Desktop** credentials, download JSON to `backend/google-calendar-credentials.json`.
+- Run first-time flow:
 
 ```bash
 cd backend
@@ -148,8 +148,8 @@ ngrok http 8080
 
 5. **Configure Twilio webhook**
 
-* Twilio Console → **Phone Numbers** → your number → **Voice & Fax**
-* **A CALL COMES IN** → **Webhook** → `https://<PUBLIC_BASE_URL>/twiml` (POST)
+- Twilio Console → **Phone Numbers** → your number → **Voice & Fax**
+- **A CALL COMES IN** → **Webhook** → `https://<PUBLIC_BASE_URL>/twiml` (POST)
 
 ### Frontend Setup (Optional Inbox App)
 
@@ -170,9 +170,10 @@ npx expo start
 3. Calendar check: if you’re in a meeting, the bot offers to book the next slot.
 4. Decision:
 
-   * **Legit + available** → `FORWARD_CALL` to your phone.
-   * **Legit + busy** → auto-books via Google Calendar.
-   * **Spam** → polite **END_CALL**.
+   - **Legit + available** → `FORWARD_CALL` to your phone.
+   - **Legit + busy** → auto-books via Google Calendar.
+   - **Spam** → polite **END_CALL**.
+
 5. The call record (number, detected name, AI summary, spam flag, WAV filename) is saved to **SQLiteCloud**.
 6. The RN app lists voicemails and can play recordings.
 
@@ -180,45 +181,47 @@ npx expo start
 
 ## REST Endpoints (Backend)
 
-* `GET /` — health, endpoints, database status
-* `POST /twiml` — TwiML for Twilio “A CALL COMES IN” webhook
-* `GET /voicemails` — list saved call records
-* `GET /voicemail/{id}/recording` — returns WAV bytes
+- `GET /` — health, endpoints, database status
+- `POST /twiml` — TwiML for Twilio “A CALL COMES IN” webhook
+- `GET /voicemails` — list saved call records
+- `GET /voicemail/{id}/recording` — returns WAV bytes
 
 ---
 
 ## Common Issues
 
-* **Frontend “Network error”**
+- **Frontend “Network error”**
   Ensure `api.js` points to a reachable base URL (LAN IP or ngrok URL).
 
-* **No bot audio / one-way audio**
+- **No bot audio / one-way audio**
   Confirm ngrok is running and Twilio webhook points to `https://<PUBLIC_BASE_URL>/twiml`.
 
-* **DB errors**
+- **DB errors**
   Double-check `SQLITECLOUD_URL` URI and that the schema init ran.
 
-* **Model timeouts**
+- **Model timeouts**
   Add/rotate more `BOSONAI_API_KEY*` entries (up to 5 supported).
 
-* **Calendar errors**
+- **Calendar errors**
   Re-run `python gcal.py` to refresh OAuth if `token.json` expired.
 
 ---
 
 ## Roadmap
 
-* [x] Calendar availability checks
-* [x] Auto-scheduling meetings
-* [ ] Push notifications for new messages
-* [ ] Call-back from the app
-* [ ] Contact whitelist/blacklist
-* [ ] Multi-language support
-* [ ] Full transcript view in app
+- [x] Calendar availability checks
+- [x] Auto-scheduling meetings
+- [ ] Push notifications for new messages
+- [ ] Call-back from the app
+- [ ] Contact whitelist/blacklist
+- [ ] Multi-language support
+- [ ] Full transcript view in app
 
 ---
 
-## Author
+## Authors
 
 **Kevin Peng** — [@pengkev](https://github.com/pengkev)
-*Built for the BosonAI Higgs Hackathon 2025*
+**Ethan Fong** — [@EthanFong30](https://github.com/EthanFong30)
+**Jordan Cui** — [@Jordan-Cui](https://github.com/Jordan-Cui)
+_Built for the BosonAI Higgs Hackathon 2025_
