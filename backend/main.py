@@ -1,9 +1,10 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import Response
+from fastapi.middleware.cors import CORSMiddleware
 import json
 import base64
 import uvicorn
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import audioop
 import wave
@@ -11,7 +12,22 @@ import webrtcvad
 import openai
 from dotenv import load_dotenv
 
+# Import database functions
+from database.db_actions import init_db, add_row, Voicemail
+
 load_dotenv()
+
+# Initialize database
+SQLITE_URL = os.getenv("SQLITECLOUD_URL")
+if SQLITE_URL:
+    try:
+        init_db(SQLITE_URL)
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"⚠️ Database initialization failed: {e}")
+        SQLITE_URL = None
+else:
+    print("⚠️ SQLITECLOUD_URL not set - database features disabled")
 
 HTTP_SERVER_PORT = 8080
 RECORDINGS_DIR = "recordings"
@@ -28,6 +44,15 @@ MIN_SPEECH_MS = 800    # minimum speech duration to count as valid utterance (in
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 app = FastAPI()
+
+# Add CORS middleware to allow frontend to access the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def log(msg, *args):
     print(f"Media WS: {msg}", *args)
@@ -449,6 +474,126 @@ async def end_call(call_sid: str):
         log(f"Error ending call: {e}")
 
 
+async def save_call_to_database(
+    call_sid: str,
+    from_number: str,
+    conversation_log: list,
+    transcripts: list,
+    recording_filename: str,
+    is_spam: bool
+):
+    """
+    Save call information to the SQLiteCloud database.
+    
+    Args:
+        call_sid: Twilio call SID
+        from_number: Caller's phone number
+        conversation_log: List of conversation exchanges
+        transcripts: List of bot responses
+        recording_filename: Path to the WAV recording file
+        is_spam: Whether the call was identified as spam
+    """
+    log(f"[SAVE] Starting database save for call {call_sid}")
+    log(f"[SAVE] Recording filename: {recording_filename}")
+    log(f"[SAVE] From number: {from_number}")
+    log(f"[SAVE] Is spam: {is_spam}")
+    
+    if not SQLITE_URL:
+        log("⚠️ Database not configured - skipping save")
+        return
+    
+    try:
+        # Extract caller name and call description from conversation
+        caller_name = "Unknown Caller"
+        description = "No conversation"
+        
+        # Try to extract name from bot responses
+        for entry in conversation_log:
+            if entry.get('speaker') == 'Bot':
+                text = entry.get('text', '')
+                # Look for patterns like "Thank you [Name]" or "Hi [Name]"
+                if 'thank you' in text.lower() or 'thanks' in text.lower() or 'hi ' in text.lower():
+                    words = text.split()
+                    for i, word in enumerate(words):
+                        if word.lower() in ['thank', 'thanks', 'hi', 'hello'] and i + 1 < len(words):
+                            potential_name = words[i + 1].strip('.,!?')
+                            if potential_name and potential_name[0].isupper() and len(potential_name) > 1:
+                                caller_name = potential_name
+                                log(f"[SAVE] Extracted caller name: {caller_name}")
+                                break
+        
+        # Create a concise, high-level description
+        if is_spam:
+            # For spam calls, create a short description
+            spam_types = {
+                'warranty': 'Car warranty scam',
+                'irs': 'IRS scam call',
+                'microsoft': 'Tech support scam',
+                'computer': 'Tech support scam',
+                'student loan': 'Student loan scam',
+                'credit card': 'Credit card offer',
+                'vacation': 'Vacation scam',
+                'prize': 'Prize scam',
+                'social security': 'Social Security scam'
+            }
+            
+            # Check transcripts for spam keywords
+            description = "Spam call"
+            if transcripts:
+                transcript_text = ' '.join(transcripts).lower()
+                for keyword, desc in spam_types.items():
+                    if keyword in transcript_text:
+                        description = desc
+                        break
+        else:
+            # For legitimate calls, extract the main topic
+            if transcripts and len(transcripts) > 0:
+                # Get the caller's stated purpose from the conversation
+                first_response = transcripts[0].replace("FORWARD_CALL", "").replace("END_CALL", "").strip()
+                
+                # Extract key phrases
+                if 'hackathon' in first_response.lower():
+                    description = "Hackathon related inquiry"
+                elif 'project' in first_response.lower():
+                    description = "Project discussion"
+                elif 'meeting' in first_response.lower():
+                    description = "Meeting request"
+                elif 'interview' in first_response.lower():
+                    description = "Interview scheduled"
+                else:
+                    # Take first sentence as description (limit to 60 chars)
+                    sentences = first_response.split('.')
+                    if sentences:
+                        description = sentences[0].strip()
+                        if len(description) > 60:
+                            description = description[:60] + "..."
+        
+        log(f"[SAVE] Caller: {caller_name}")
+        log(f"[SAVE] Description: {description}")
+        
+        # Create Voicemail object
+        voicemail = Voicemail(
+            id=0,  # Will be auto-generated by database
+            number=from_number if from_number and from_number != 'unknown' and from_number != 'Unknown' else 'Unknown Number',
+            name=caller_name,
+            description=description,
+            spam=is_spam,
+            date=datetime.now(timezone.utc),
+            unread=True,
+            recording=recording_filename
+        )
+        
+        log(f"[SAVE] Calling add_row() to save to database...")
+        # Save to database
+        add_row(SQLITE_URL, voicemail)
+        log(f"✅ Call saved to database: {caller_name} ({from_number}) - Spam: {is_spam}")
+        
+    except Exception as e:
+        log(f"❌ Failed to save call to database: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 class VadProcessor:
     """Handles VAD-based speech segmentation for endpointing."""
     
@@ -602,6 +747,8 @@ async def media_stream(websocket: WebSocket):
     conversation_log = []  # Detailed conversation with caller and bot
     conversation_history = []  # Track full conversation
     greeting_sent = False
+    from_number = "unknown"  # Initialize to default value
+    recording_filename = None  # Track recording filename
     
     # Track bot speaking state to prevent VAD during bot responses
     bot_is_speaking = False
@@ -629,7 +776,7 @@ async def media_stream(websocket: WebSocket):
         in_speech = False
         
         # Process with BosonAI and stream response back
-        if stream_sid:  # Make sure we have a stream_sid
+        if stream_sid and call_sid:  # Make sure we have both stream_sid and call_sid
             response, bot_audio, action = await process_utterance_and_respond(pcm16_16k, websocket, stream_sid, conversation_history, call_sid, wav_file)
             if response:
                 transcripts.append(response)
@@ -644,7 +791,7 @@ async def media_stream(websocket: WebSocket):
                     "text": response
                 })
         else:
-            log("Warning: stream_sid not set yet, skipping utterance")
+            log("Warning: stream_sid or call_sid not set yet, skipping utterance")
         
         # Re-enable VAD after bot finishes speaking (with delay built into process_utterance_and_respond)
         bot_is_speaking = False
@@ -687,13 +834,20 @@ async def media_stream(websocket: WebSocket):
                 stream_sid = data.get('streamSid')
                 call_sid = data['start'].get('callSid')
                 
-                # Extract caller info if available
-                from_number = data['start'].get('customParameters', {}).get('from', 'unknown')
+                # Extract caller phone number - Twilio sends this in the start event
+                # Try multiple possible fields where the number might be
+                from_number = (
+                    data['start'].get('customParameters', {}).get('From') or
+                    data['start'].get('customParameters', {}).get('from') or
+                    data.get('from') or
+                    'Unknown'
+                )
                 log(f"Call from: {from_number}")
                 
                 # Create WAV file for this call (8 kHz native PSTN rate)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"{RECORDINGS_DIR}/call_{call_sid}_{timestamp}.wav"
+                recording_filename = f"call_{call_sid}_{timestamp}.wav"  # Store just the filename
                 
                 # Open WAV file with proper settings for mulaw -> PCM conversion
                 wav_file = wave.open(filename, 'wb')
@@ -824,6 +978,26 @@ async def media_stream(websocket: WebSocket):
             wav_file.close()
             log(f"WAV file saved successfully - ready to play!")
         
+        # Determine if call was spam based on conversation
+        is_spam = False
+        for entry in conversation_log:
+            if entry.get('speaker') == 'Bot':
+                text = entry.get('text', '').lower()
+                if 'spam' in text or 'end_call' in text or 'scam' in text:
+                    is_spam = True
+                    break
+        
+        # Save call to database
+        if call_sid and recording_filename:
+            await save_call_to_database(
+                call_sid=call_sid,
+                from_number=from_number,
+                conversation_log=conversation_log,
+                transcripts=transcripts,
+                recording_filename=recording_filename,
+                is_spam=is_spam
+            )
+        
         # Log full conversation
         if conversation_log:
             log(f"\n{'='*60}")
@@ -856,9 +1030,69 @@ async def root():
         "message": "Twilio Media Stream FastAPI Server",
         "endpoints": {
             "twiml": "/twiml (POST)",
-            "websocket": "/media-stream (WebSocket)"
-        }
+            "websocket": "/media-stream (WebSocket)",
+            "voicemails": "/voicemails (GET)",
+            "voicemail_recording": "/voicemail/{id}/recording (GET)"
+        },
+        "database": "enabled" if SQLITE_URL else "disabled"
     }
+
+
+@app.get("/voicemails")
+async def get_voicemails():
+    """Retrieve all voicemails from the database"""
+    log("[API] GET /voicemails - Fetching voicemails from database")
+    
+    if not SQLITE_URL:
+        log("[API] ERROR: Database not configured")
+        return {"error": "Database not configured"}
+    
+    try:
+        from database.db_actions import read_table
+        voicemails = read_table(SQLITE_URL)
+        
+        log(f"[API] Retrieved {len(voicemails)} voicemails from database")
+        
+        # Convert to JSON-serializable format
+        result = []
+        for vm in voicemails:
+            result.append({
+                "id": vm.id,
+                "number": vm.number,
+                "name": vm.name,
+                "description": vm.description,
+                "spam": vm.spam,
+                "date": vm.date.isoformat(),
+                "unread": vm.unread,
+                "recording": vm.recording
+            })
+        
+        log(f"[API] Returning {len(result)} voicemails to frontend")
+        return {"voicemails": result, "count": len(result)}
+    except Exception as e:
+        log(f"[API] ERROR fetching voicemails: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
+
+@app.get("/voicemail/{voicemail_id}/recording")
+async def get_voicemail_recording(voicemail_id: int):
+    """Get the audio recording for a specific voicemail"""
+    if not SQLITE_URL:
+        return {"error": "Database not configured"}
+    
+    try:
+        from database.db_actions import get_recording
+        recording_bytes = get_recording(SQLITE_URL, voicemail_id)
+        
+        if recording_bytes:
+            from fastapi.responses import Response
+            return Response(content=recording_bytes, media_type="audio/wav")
+        else:
+            return {"error": "Recording not found"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 if __name__ == '__main__':

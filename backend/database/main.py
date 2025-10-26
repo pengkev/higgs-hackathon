@@ -65,6 +65,7 @@ def put_recording(voicemail: Voicemail):
             
             blob = get_recording(sqlite_url, voicemail.id)
             return Response(content=blob, media_type="audio/wav")
+
 if __name__ == "__main__":
     get_voicemails()
     uvicorn.run(app, host="0.0.0.0", port=8000)
