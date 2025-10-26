@@ -1,0 +1,38 @@
+{
+  "call_sid": "CAcb06ef6d97dabcdb87b4bd2dfb0eac54",
+  "from_number": "unknown",
+  "start_time": "2025-10-26T11:12:01.205073",
+  "end_time": "2025-10-26T11:14:05.197819",
+  "duration_seconds": 123.99,
+  "call_in_progress": false,
+  "final_action": null,
+  "conversation": [
+    {
+      "speaker": "AI Receptionist",
+      "text": "Hi, you've reached the office of kevin. How can I help you today?",
+      "timestamp": "2025-10-26T11:12:04.274331"
+    },
+    {
+      "speaker": "Caller",
+      "duration_ms": 7180,
+      "audio_size_bytes": 266878,
+      "text": "hi this is kevin's dad i haven't got to meet with me on a friday day i was just wondering if he was available so i could schedule a meeting with him"
+    },
+    {
+      "speaker": "AI Receptionist",
+      "text": "Thank you for calling. May I ask for your name, and could you share a bit more about what you'd like to discuss with Kevin?",
+      "timestamp": "2025-10-26T11:12:27.937151"
+    },
+    {
+      "speaker": "Caller",
+      "duration_ms": 14700,
+      "audio_size_bytes": 522238,
+      "text": "my name is henry pang i just want to talk to him and well i don't want to talk to him i want to schedule a meeting with his calendar are you able to help me schedule with him so we can meet for a father's day meeting"
+    },
+    {
+      "speaker": "AI Receptionist",
+      "text": "Thanks for clarifying, Henry. Could you share the specific date and time you'd like to schedule for Father's Day? I can book that directly in Kevin's calendar for you.",
+      "timestamp": "2025-10-26T11:13:13.873957"
+    }
+  ]
+}

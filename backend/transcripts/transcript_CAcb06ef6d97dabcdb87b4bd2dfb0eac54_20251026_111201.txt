@@ -1,0 +1,19 @@
+CALL TRANSCRIPT
+============================================================
+Call ID: CAcb06ef6d97dabcdb87b4bd2dfb0eac54
+From: unknown
+Start: 2025-10-26 11:12:01
+End: 2025-10-26 11:14:05
+Duration: 124.0 seconds
+============================================================
+
+[1] AI RECEPTIONIST: Hi, you've reached the office of kevin. How can I help you today?
+
+[2] CALLER: hi this is kevin's dad i haven't got to meet with me on a friday day i was just wondering if he was available so i could schedule a meeting with him
+
+[3] AI RECEPTIONIST: Thank you for calling. May I ask for your name, and could you share a bit more about what you'd like to discuss with Kevin?
+
+[4] CALLER: my name is henry pang i just want to talk to him and well i don't want to talk to him i want to schedule a meeting with his calendar are you able to help me schedule with him so we can meet for a father's day meeting
+
+[5] AI RECEPTIONIST: Thanks for clarifying, Henry. Could you share the specific date and time you'd like to schedule for Father's Day? I can book that directly in Kevin's calendar for you.
+
