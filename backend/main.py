@@ -1394,10 +1394,11 @@ async def media_stream(websocket: WebSocket):
     # Track bot speaking state to prevent VAD during bot responses
     bot_is_speaking = False
     bot_speaking_until = None  # Timestamp when bot will finish speaking + buffer delay
+    bot_finished_time = None  # Track when bot finished speaking for debounce
     
     # Callback for when VAD detects a complete utterance
     async def on_utterance(pcm16_16k: bytes, speech_duration_ms: int):
-        nonlocal bot_is_speaking, buf_pcm16_8k, sil_ms, speech_ms, utt_ms, in_speech, final_action, mulaw_buffer, exchange_count, bot_speaking_until
+        nonlocal bot_is_speaking, buf_pcm16_8k, sil_ms, speech_ms, utt_ms, in_speech, final_action, mulaw_buffer, exchange_count, bot_speaking_until, bot_finished_time
         
         # Ignore very short utterances (breath, noise, feedback)
         if speech_duration_ms < MIN_SPEECH_MS:
@@ -1523,18 +1524,17 @@ async def media_stream(websocket: WebSocket):
                 if bot_is_speaking:
                     continue
                 
-                # Check debounce period - skip VAD immediately after bot finishes speaking
-                if bot_finished_time is not None:
+                # Check if we're still in the blocking period after bot spoke
+                if bot_speaking_until is not None:
                     import time
-                    time_since_bot_finished = time.time() - bot_finished_time
-                    if time_since_bot_finished < DEBOUNCE_SECONDS:
-                        # Still in debounce period - skip VAD processing
+                    current_time = datetime.now()
+                    if current_time < bot_speaking_until:
+                        # Still in blocking period - skip VAD processing
                         continue
                     else:
-                        # Debounce period over - clear the timer and resume normal processing
-                        if bot_finished_time is not None:  # Only log once
-                            log("Debounce period over - resuming VAD")
-                            bot_finished_time = None
+                        # Blocking period over - clear the timer and resume normal processing
+                        log(f"✅ Blocking period over - resuming VAD at {current_time.strftime('%H:%M:%S.%f')[:-3]}")
+                        bot_speaking_until = None
                 
                 if not has_seen_media:
                     log("Media message received - streaming audio with VAD...")
