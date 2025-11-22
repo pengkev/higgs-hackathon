@@ -858,11 +858,14 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         log(f"Using emotion: {emotion} (caller emotion: {caller_detected_emotion})")
         
         tts_start = time.time()
+        a = tts_text.split("|")
+        log(a)
         speech_response = await generate_speech_with_emotion(
-            text=tts_text,
-            emotion=emotion
+            text=a[1],
+            emotion=a[0]
         )
         tts_duration = time.time() - tts_start
+        log(f"Using emotion {emotion}")
         log(f"⏱️ TTS audio generation took {tts_duration:.3f}s")
         
         if not speech_response:
