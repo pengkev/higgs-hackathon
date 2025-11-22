@@ -860,9 +860,11 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         tts_start = time.time()
         a = tts_text.split("|")
         log(a)
+        if len(a) == 2:
+            emotion = a[1]
         speech_response = await generate_speech_with_emotion(
-            text=a[1],
-            emotion=a[0]
+            text=a[0],
+            emotion=emotion
         )
         tts_duration = time.time() - tts_start
         log(f"Using emotion {emotion}")
