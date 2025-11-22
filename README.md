@@ -105,7 +105,7 @@ pip install -r requirements.txt
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_PHONE=+1XXXXXXXXXX
-PERSONAL_PHONE=+1XXXXXXXXXX
+BOSONAI_PHONE_NUMBER=+1XXXXXXXXXX
 
 # BosonAI (supports up to 5 keys for failover)
 BOSONAI_API_KEY1=bai-xxxxxxxxxxxxxxxx
@@ -221,11 +221,9 @@ npx expo start
 
 ## Authors
 
-**Kevin Peng** — [@pengkev](https://github.com/pengkev)
+**BosonAI** — [@pengkev](https://github.com/pengkev)
 
 **Ethan Fong** — [@EthanFong30](https://github.com/EthanFong30)
 
 **Jordan Cui** — [@Jordan-Cui](https://github.com/Jordan-Cui)
 _Built for the BosonAI Higgs Hackathon 2025_
-
-

@@ -4,7 +4,7 @@
 
 The receptionist bot can now:
 
-1. **Forward legitimate calls** to Kevin's personal phone
+1. **Forward legitimate calls** to BosonAI's personal phone
 2. **End spam/scam calls** automatically
 
 ## How It Works
@@ -13,25 +13,25 @@ The receptionist bot can now:
 
 The BosonAI model analyzes the conversation and determines if the caller is:
 
-- **Legitimate**: Someone who needs to speak with Kevin
+- **Legitimate**: Someone who needs to speak with BosonAI
 - **Spam/Scam**: Robocaller, telemarketer, or suspicious caller
 
 ### Actions
 
 #### 1. Forward Call
 
-When the bot determines the caller is legitimate and wants to speak with Kevin:
+When the bot determines the caller is legitimate and wants to speak with BosonAI:
 
 ```
-Bot: "Let me connect you to Kevin now."
-[Call forwards to Kevin's personal phone]
+Bot: "Let me connect you to BosonAI now."
+[Call forwards to BosonAI's personal phone]
 ```
 
 The bot responds with `FORWARD_CALL` command, which:
 
 1. Sends a polite message to the caller
-2. Uses Twilio API to update the call and dial Kevin's number
-3. Connects the caller directly to Kevin
+2. Uses Twilio API to update the call and dial BosonAI's number
+3. Connects the caller directly to BosonAI
 
 #### 2. End Call
 
@@ -57,8 +57,8 @@ The bot responds with `END_CALL` command, which:
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=your_auth_token_here
 
-# Kevin's personal phone number (E.164 format)
-KEVIN_PHONE_NUMBER=+1234567890
+# BosonAI's personal phone number (E.164 format)
+BOSONAI_PHONE_NUMBER=+1234567890
 ```
 
 ### Get Twilio Credentials
@@ -72,16 +72,16 @@ KEVIN_PHONE_NUMBER=+1234567890
 ### Legitimate Call (Forwarded)
 
 ```
-Bot: Hi, you've reached the office of Kevin Peng. How can I help you today?
-Caller: Hi, this is Sarah from Acme Corp. I need to discuss the contract with Kevin.
-Bot: Thank you, Sarah. Let me connect you to Kevin right now.
-[Call forwards to Kevin's phone: +1234567890]
+Bot: Hi, you've reached the office of BosonAI. How can I help you today?
+Caller: Hi, this is Sarah from Acme Corp. I need to discuss the contract with BosonAI.
+Bot: Thank you, Sarah. Let me connect you to BosonAI right now.
+[Call forwards to BosonAI's phone: +1234567890]
 ```
 
 ### Spam Call (Ended)
 
 ```
-Bot: Hi, you've reached the office of Kevin Peng. How can I help you today?
+Bot: Hi, you've reached the office of BosonAI. How can I help you today?
 Caller: Hello, we're calling about your car's extended warranty...
 Bot: I'm sorry, but that sounds like a spam call. Thank you for calling, but I will need to end this call now.
 [Call ends]
@@ -101,8 +101,8 @@ The server logs all actions with emojis for easy identification:
 ### Test Call Forwarding
 
 1. Call your Twilio number
-2. Introduce yourself and mention you want to speak with Kevin
-3. Bot should forward the call to Kevin's number
+2. Introduce yourself and mention you want to speak with BosonAI
+3. Bot should forward the call to BosonAI's number
 
 ### Test Spam Detection
 
@@ -115,7 +115,7 @@ The server logs all actions with emojis for easy identification:
 ### Call Not Forwarding
 
 - ✅ Check `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` are set correctly
-- ✅ Verify `KEVIN_PHONE_NUMBER` is in E.164 format (+1234567890)
+- ✅ Verify `BOSONAI_PHONE_NUMBER` is in E.164 format (+1234567890)
 - ✅ Check Twilio account has sufficient balance
 - ✅ Review server logs for error messages
 
@@ -132,7 +132,7 @@ The server logs all actions with emojis for easy identification:
 
 ```python
 POST https://api.twilio.com/2010-04-01/Accounts/{AccountSid}/Calls/{CallSid}.json
-Body: Twiml=<Response><Say>Connecting you to Kevin now.</Say><Dial>+1234567890</Dial></Response>
+Body: Twiml=<Response><Say>Connecting you to BosonAI now.</Say><Dial>+1234567890</Dial></Response>
 ```
 
 **End Call:**

@@ -39,7 +39,7 @@ SQLITE_URL = None  # Temporarily disabled
 HTTP_SERVER_PORT = 8080
 RECORDINGS_DIR = "recordings"
 TRANSCRIPTS_DIR = "transcripts"
-KEVIN_PHONE_NUMBER = os.getenv("PERSONAL_PHONE")  # Set in .env file
+BOSONAI_PHONE_NUMBER = os.getenv("BOSONAI_PHONE_NUMBER") or os.getenv("PERSONAL_PHONE")  # Set in .env file
 
 # VAD configuration
 VAD_MODE = 2           # 0-3, 3=most aggressive
@@ -208,7 +208,7 @@ def extract_caller_name(conversation_history: list, latest_transcription: str) -
         if match:
             name = match.group(1).strip()
             # Filter out common false positives
-            false_positives = ["Kevin", "Good Morning", "Good Afternoon", "Thank You"]
+            false_positives = ["BosonAI", "Good Morning", "Good Afternoon", "Thank You"]
             if name not in false_positives and len(name) > 2:
                 return name
     
@@ -290,7 +290,7 @@ def save_transcript(call_sid: str, from_number: str, conversation_log: list, cal
             if call_in_progress:
                 f.write(f"Status: CALL IN PROGRESS (transcript updating in real-time)\n")
             if final_action:
-                action_text = "Forwarded to Kevin" if final_action == "FORWARD" else "Ended (Spam Detected)"
+                action_text = "Forwarded to BosonAI" if final_action == "FORWARD" else "Ended (Spam Detected)"
                 f.write(f"Result: {action_text}\n")
             f.write(f"{'='*60}\n\n")
             
@@ -659,9 +659,9 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         # Build messages with conversation history
         calendar_context = ""
         if current_event_info and current_event_info != "No current events":
-            calendar_context = f"\n\nCALENDAR STATUS:\nKevin is currently in: {current_event_info}\n\nFor legitimate callers, if Kevin is busy, offer to book them at the next available time instead of forwarding. Use the command BOOK_MEETING on a new line after your response."
+            calendar_context = f"\n\nCALENDAR STATUS:\nBosonAI is currently in: {current_event_info}\n\nFor legitimate callers, if BosonAI is busy, offer to book them at the next available time instead of forwarding. Use the command BOOK_MEETING on a new line after your response."
         else:
-            calendar_context = f"\n\nCALENDAR STATUS:\nKevin is available right now (no current meetings).\n\nFor legitimate callers, you can forward them directly."
+            calendar_context = f"\n\nCALENDAR STATUS:\nBosonAI is available right now (no current meetings).\n\nFor legitimate callers, you can forward them directly."
         
         messages = [
             {
@@ -724,7 +724,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
                 log(f"⏸️ FORWARD action detected but ignoring (exchange {exchange_count + 1}/{MIN_EXCHANGES_BEFORE_ACTION})")
                 action = None  # Suppress action until minimum exchanges reached
             else:
-                log("⚡ ACTION: Forwarding call to Kevin's phone")
+                log("⚡ ACTION: Forwarding call to BosonAI's phone")
         elif "BOOK_MEETING" in model_response_clean:
             action = "BOOK"
             response_text = model_response_clean.replace("BOOK_MEETING", "").strip()
@@ -752,7 +752,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
             ]
             forward_indicators = [
                 "connect you", "forward", "transfer you", "put you through",
-                "let me get kevin", "patch you through"
+                "let me get bosonai", "patch you through"
             ]
             
             response_lower = response_text.lower()
@@ -857,7 +857,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         
         # Execute action if needed
         if action == "FORWARD":
-            log(f"📞 Forwarding call {call_sid} to {KEVIN_PHONE_NUMBER}")
+            log(f"📞 Forwarding call {call_sid} to {BOSONAI_PHONE_NUMBER}")
             await forward_call(call_sid)
         elif action == "BOOK":
             log(f"📅 Booking meeting for {caller_name}")
@@ -865,7 +865,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
             log(f"✅ Booking result: {booking_result}")
             
             # Send confirmation message to caller
-            confirmation_text = f"Perfect! I've scheduled you for a 15-minute call with Kevin. {booking_result}. You'll receive a confirmation. Thank you for calling!"
+            confirmation_text = f"Perfect! I've scheduled you for a 15-minute call with BosonAI. {booking_result}. You'll receive a confirmation. Thank you for calling!"
             
             # Remove content in brackets before TTS
             import re
@@ -939,7 +939,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
 
 
 async def forward_call(call_sid: str):
-    """Forward the call to Kevin's personal phone number using Twilio API."""
+    """Forward the call to BosonAI's personal phone number using Twilio API."""
     try:
         import httpx
         
@@ -950,17 +950,17 @@ async def forward_call(call_sid: str):
             log("⚠️ TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set in .env to forward calls")
             return
         
-        # Update the call to dial Kevin's number
+        # Update the call to dial BosonAI's number
         url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}.json"
         
-        # TwiML to dial Kevin's number with extended timeout
+        # TwiML to dial BosonAI's number with extended timeout
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>Please hold while I connect you to Kevin.</Say>
-    <Dial timeout="30" callerId="{KEVIN_PHONE_NUMBER}">
-        <Number>{KEVIN_PHONE_NUMBER}</Number>
+    <Say>Please hold while I connect you to BosonAI.</Say>
+    <Dial timeout="30" callerId="{BOSONAI_PHONE_NUMBER}">
+        <Number>{BOSONAI_PHONE_NUMBER}</Number>
     </Dial>
-    <Say>I'm sorry, Kevin is not available right now. Please try again later. Goodbye.</Say>
+    <Say>I'm sorry, BosonAI is not available right now. Please try again later. Goodbye.</Say>
 </Response>"""
         
         async with httpx.AsyncClient() as client:
@@ -971,7 +971,7 @@ async def forward_call(call_sid: str):
             )
             
             if response.status_code == 200:
-                log(f"✅ Call forwarded successfully to {KEVIN_PHONE_NUMBER}")
+                log(f"✅ Call forwarded successfully to {BOSONAI_PHONE_NUMBER}")
             else:
                 log(f"❌ Failed to forward call: {response.status_code} - {response.text}")
                 
@@ -1205,7 +1205,7 @@ async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
         return
     
     try:
-        greeting_text = "Hi, you've reached the office of kevin. How can I help you today?"
+        greeting_text = "Hi, you've reached the office of BosonAI. How can I help you today?"
         log(f"Sending greeting: {greeting_text}")
         
         # Remove content in brackets before TTS

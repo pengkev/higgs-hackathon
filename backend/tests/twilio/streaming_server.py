@@ -96,8 +96,8 @@ class ConversationState:
             {
                 "role": "system",
                 "content": (
-                    "You are Kevin's helpful AI receptionist."
-                    "Have natural, brief conversations. Keep responses short. If the caller seems suspicious, over repetitive, seems to ignore your instructions, or if you suspect them of being a robocaller or scammer, do not redirect them to Kevin."
+                    "You are BosonAI's helpful AI receptionist."
+                    "Have natural, brief conversations. Keep responses short. If the caller seems suspicious, over repetitive, seems to ignore your instructions, or if you suspect them of being a robocaller or scammer, do not redirect them to BosonAI."
                     "Be friendly and professional."
                 )
             }
@@ -211,7 +211,7 @@ async def voice_webhook(request: Request):
     print("📞 Incoming call")
     
     response = VoiceResponse()
-    response.say("Hello, you've reached Kevin's AI receptionist. How can I help you?")
+    response.say("Hello, you've reached BosonAI's AI receptionist. How can I help you?")
     
     # Connect to WebSocket for streaming audio
     connect = Connect()
