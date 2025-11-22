@@ -24,6 +24,7 @@ response = client.audio.speech.create(
     voice="vex",
     input="Hi, this is Mark calling from United Auto Warranty. I see that the Warranty on your Lexus has expired earlier this month and I was just calling to see if you would like to extend this warranty to keep your car protected for an additional 2 years.",
     response_format="pcm"
+    
 )
 
 # You can use these parameters to write PCM data to a WAV file

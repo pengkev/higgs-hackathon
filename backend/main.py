@@ -449,6 +449,10 @@ async def generate_call_summary(conversation: list) -> str:
         return "Error generating summary"
 
 
+async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, stream_sid: str, conversation_history: list, call_sid: str, exchange_count: int = 0):
+    """Process user utterance and generate/send response."""
+    if not boson_clients:
+        return None, None, None, None, 0.0
 async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, stream_sid: str, conversation_history: list, call_sid: str, wav_file=None, exchange_count: int = 0):
     """Send PCM16 16kHz audio to BosonAI and stream response back to Twilio."""
     if not asr_tts_client or not qwen_client:
@@ -501,13 +505,13 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         
         if not transcription_response:
             log("Failed to get transcription from BosonAI (all API keys failed or timed out)")
-            return None, None, None, None
+            return None, None, None, None, 0.0
         
         caller_transcription = transcription_response.choices[0].message.content
         
         if not caller_transcription:
             log("No transcription received")
-            return None, None, None, None
+            return None, None, None, None, 0.0
         
         log(f"📝 Caller said: \"{caller_transcription}\"")
         
@@ -551,13 +555,13 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         
         if not response:
             log("Failed to get response from BosonAI (all API keys failed or timed out)")
-            return None, None, None, None
+            return None, None, None, None, 0.0
         
         model_response = response.choices[0].message.content
         
         if not model_response:
             log("No response from BosonAI")
-            return None, None, None, None
+            return None, None, None, None, 0.0
             
         log(f"🤖 AI response: {model_response}")
         
@@ -664,7 +668,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         
         if not speech_response:
             log("Failed to generate speech from BosonAI (all API keys failed or timed out)")
-            return None, None, None, None
+            return None, None, None, None, 0.0
         
         # Audio specs from example1.py
         # num_channels = 1
@@ -677,10 +681,6 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         
         # Convert PCM16 24kHz -> PCM16 8kHz for recording and Twilio
         pcm16_8k_full, _ = audioop.ratecv(pcm_data, 2, 1, 24000, 8000, None)
-        
-        # Write bot response to WAV file
-        if wav_file:
-            wav_file.writeframes(pcm16_8k_full)
         
         # Calculate audio duration for proper delay (PCM16 8kHz, mono, 2 bytes/sample)
         audio_duration_seconds = len(pcm16_8k_full) / (8000 * 2)
@@ -1061,7 +1061,7 @@ async def return_twiml(request: Request):
     return Response(content=twiml, media_type="application/xml")
 
 
-async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
+async def send_greeting(websocket: WebSocket, stream_sid: str):
     """Send initial greeting when call starts."""
     if not asr_tts_client:
         return
@@ -1085,7 +1085,7 @@ async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
         
         if not speech_response:
             log("Failed to generate greeting from BosonAI (all API keys failed or timed out)")
-            return None
+            return None, 0.0, None
         
         pcm_data = speech_response.content
         log(f"Received {len(pcm_data)} bytes of PCM audio for greeting")
@@ -1096,10 +1096,6 @@ async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
         # Calculate greeting audio duration
         greeting_duration_seconds = len(pcm16_8k_full) / (8000 * 2)
         log(f"Greeting audio duration: {greeting_duration_seconds:.2f} seconds")
-        
-        # Write bot greeting to WAV file
-        if wav_file:
-            wav_file.writeframes(pcm16_8k_full)
         
         # Send to Twilio in chunks
         chunk_size = 1600  # 100ms at 8kHz
@@ -1128,11 +1124,11 @@ async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
         total_delay_seconds = greeting_duration_seconds + POST_AUDIO_DELAY_SECONDS
         log(f"Will block user input for {total_delay_seconds:.2f}s ({greeting_duration_seconds:.2f}s audio + {POST_AUDIO_DELAY_SECONDS:.2f}s buffer)")
         
-        return greeting_text, total_delay_seconds
+        return greeting_text, total_delay_seconds, pcm16_8k_full
         
     except Exception as e:
         log(f"Error sending greeting: {e}")
-        return None, 0.0  # Return 0 duration on error
+        return None, 0.0, None  # Return 0 duration on error
 
 
 @app.websocket("/media-stream")
@@ -1156,6 +1152,9 @@ async def media_stream(websocket: WebSocket):
     greeting_sent = False
     exchange_count = 0  # Track number of caller-bot exchanges (greeting doesn't count)
     
+    # Stereo recording buffer for bot audio
+    bot_audio_buffer = bytearray()
+    
     # Track bot speaking state to prevent VAD during bot responses
     bot_is_speaking = False
     bot_speaking_until = None  # Timestamp when bot will finish speaking + buffer delay
@@ -1163,7 +1162,7 @@ async def media_stream(websocket: WebSocket):
     
     # Callback for when VAD detects a complete utterance
     async def on_utterance(pcm16_16k: bytes, speech_duration_ms: int):
-        nonlocal bot_is_speaking, buf_pcm16_8k, sil_ms, speech_ms, utt_ms, in_speech, final_action, mulaw_buffer, exchange_count, bot_speaking_until, bot_finished_time
+        nonlocal bot_is_speaking, buf_pcm16_8k, sil_ms, speech_ms, utt_ms, in_speech, final_action, mulaw_buffer, exchange_count, bot_speaking_until, bot_finished_time, bot_audio_buffer
         
         # Ignore very short utterances (breath, noise, feedback)
         if speech_duration_ms < MIN_SPEECH_MS:
@@ -1184,7 +1183,8 @@ async def media_stream(websocket: WebSocket):
         # Process with BosonAI and stream response back
         if stream_sid:  # Make sure we have a stream_sid
             from datetime import timedelta
-            response, bot_audio, action, caller_text, delay_seconds = await process_utterance_and_respond(pcm16_16k, websocket, stream_sid, conversation_history, call_sid, wav_file, exchange_count=exchange_count)
+            # Removed wav_file argument
+            response, bot_audio, action, caller_text, delay_seconds = await process_utterance_and_respond(pcm16_16k, websocket, stream_sid, conversation_history, call_sid, exchange_count=exchange_count)
             if response:
                 transcripts.append(response)
                 # Increment exchange counter (caller spoke + bot responded = 1 exchange)
@@ -1206,6 +1206,10 @@ async def media_stream(websocket: WebSocket):
                     "text": clean_text_for_transcript(response),
                     "timestamp": datetime.now().isoformat()
                 })
+                
+                # Add bot audio to buffer for stereo recording
+                if bot_audio:
+                    bot_audio_buffer.extend(bot_audio)
                 
                 # Save transcript after each exchange (overwrite same file)
                 save_transcript(call_sid, from_number, conversation_log, call_start_time, datetime.now(), final_action, call_in_progress=True)
@@ -1269,21 +1273,47 @@ async def media_stream(websocket: WebSocket):
                 
                 # Open WAV file with proper settings for mulaw -> PCM conversion
                 wav_file = wave.open(filename, 'wb')
-                wav_file.setnchannels(1)  # Mono
+                wav_file.setnchannels(2)  # Stereo (Left=Caller, Right=Bot)
                 wav_file.setsampwidth(2)  # 2 bytes (16-bit PCM)
                 wav_file.setframerate(8000)  # 8000 Hz (native PSTN)
                 
-                log(f"Recording to WAV (8kHz): {filename}")
+                log(f"Recording to WAV (8kHz Stereo): {filename}")
                 log(f"VAD enabled: endpointing at {END_SIL_MS}ms silence, min speech {MIN_SPEECH_MS}ms")
                 log(f"BosonAI bot ready")
             
             elif data['event'] == "media":
-                # Always write to WAV for complete recording
+                # Process media for recording and VAD
                 payload = data['media']['payload']
                 mulaw_data = base64.b64decode(payload)
+                
+                # Write to stereo WAV file
                 if wav_file:
-                    pcm_data = audioop.ulaw2lin(mulaw_data, 2)
-                    wav_file.writeframes(pcm_data)
+                    # Caller audio (Left channel)
+                    caller_pcm = audioop.ulaw2lin(mulaw_data, 2)
+                    
+                    # Bot audio (Right channel)
+                    # Pop corresponding amount of audio from buffer
+                    chunk_len = len(caller_pcm)
+                    if len(bot_audio_buffer) >= chunk_len:
+                        bot_pcm = bot_audio_buffer[:chunk_len]
+                        del bot_audio_buffer[:chunk_len]
+                    else:
+                        # Not enough bot audio, pad with silence
+                        bot_pcm = bot_audio_buffer[:]
+                        del bot_audio_buffer[:]
+                        padding = bytes(chunk_len - len(bot_pcm))
+                        bot_pcm += padding
+                    
+                    # Create stereo frame: Left=Caller, Right=Bot
+                    # audioop.tostereo(fragment, width, lfactor, rfactor)
+                    # lfactor=1, rfactor=0 -> Left channel
+                    # lfactor=0, rfactor=1 -> Right channel
+                    left_stereo = audioop.tostereo(caller_pcm, 2, 1, 0)
+                    right_stereo = audioop.tostereo(bot_pcm, 2, 0, 1)
+                    
+                    # Combine channels
+                    stereo_frame = audioop.add(left_stereo, right_stereo, 2)
+                    wav_file.writeframes(stereo_frame)
                 
                 # Skip VAD processing if bot is speaking (but keep recording above)
                 if bot_is_speaking:
@@ -1310,10 +1340,11 @@ async def media_stream(websocket: WebSocket):
                     if not greeting_sent and stream_sid:
                         from datetime import timedelta
                         bot_is_speaking = True  # Prevent VAD during greeting
-                        greeting_result = await send_greeting(websocket, stream_sid, wav_file)
+                        # Removed wav_file argument
+                        greeting_result = await send_greeting(websocket, stream_sid)
                         
                         if greeting_result:
-                            greeting, delay_seconds = greeting_result
+                            greeting, delay_seconds, bot_audio = greeting_result
                             if greeting:
                                 conversation_history.append({
                                     "role": "assistant",
@@ -1324,6 +1355,10 @@ async def media_stream(websocket: WebSocket):
                                     "text": clean_text_for_transcript(greeting),
                                     "timestamp": datetime.now().isoformat()
                                 })
+                                
+                                # Add greeting audio to buffer
+                                if bot_audio:
+                                    bot_audio_buffer.extend(bot_audio)
                                 
                                 # Save transcript after greeting (overwrite same file)
                                 save_transcript(call_sid, from_number, conversation_log, call_start_time, datetime.now(), final_action, call_in_progress=True)
@@ -1342,29 +1377,6 @@ async def media_stream(websocket: WebSocket):
                         in_speech = False
                         greeting_sent = True
                         continue  # Skip processing this packet
-                
-                payload = data['media']['payload']  # base64 encoded mulaw audio
-                mulaw_data = base64.b64decode(payload)
-                
-                # Write caller audio (8kHz PCM) to WAV file for archival
-                if wav_file:
-                    pcm_data = audioop.ulaw2lin(mulaw_data, 2)
-                    wav_file.writeframes(pcm_data)
-                
-                # Check if we're still in the blocking period (simple timestamp check)
-                if bot_speaking_until and datetime.now() < bot_speaking_until:
-                    # Still within the delay period - ignore all audio input
-                    continue
-                elif bot_speaking_until and datetime.now() >= bot_speaking_until:
-                    # Just passed the blocking threshold - clear buffers and resume listening
-                    log(f"✅ Delay period complete - now listening for caller input")
-                    bot_speaking_until = None
-                    # Clear buffers to discard any accumulated audio/echo
-                    mulaw_buffer.clear()
-                    buf_pcm16_8k.clear()
-                    sil_ms = speech_ms = utt_ms = 0
-                    in_speech = False
-                    continue
                 
                 # Add to buffer and process in 20ms frames (160 bytes μ-law)
                 # (mulaw_data already extracted at top of media event handler)
