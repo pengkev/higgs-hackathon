@@ -38,6 +38,7 @@ recordings/
 output_recordings/
 *.mp3
 *.wav
+transcripts/
 
 # IDE
 .vscode/

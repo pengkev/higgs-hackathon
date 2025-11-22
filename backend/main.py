@@ -15,21 +15,22 @@ from dotenv import load_dotenv
 from gcal import get_current_event, book_next_available
 
 # Import database functions
-from database.db_actions import init_db, add_row, Voicemail
+# from database.db_actions import init_db, add_row, Voicemail
 
 load_dotenv()
 
 # Initialize database
-SQLITE_URL = os.getenv("SQLITECLOUD_URL")
-if SQLITE_URL:
-    try:
-        init_db(SQLITE_URL)
-        print("✅ Database initialized successfully")
-    except Exception as e:
-        print(f"⚠️ Database initialization failed: {e}")
-        SQLITE_URL = None
-else:
-    print("⚠️ SQLITECLOUD_URL not set - database features disabled")
+# SQLITE_URL = os.getenv("SQLITECLOUD_URL")
+# if SQLITE_URL:
+#     try:
+#         init_db(SQLITE_URL)
+#         print("✅ Database initialized successfully")
+#     except Exception as e:
+#         print(f"⚠️ Database initialization failed: {e}")
+#         SQLITE_URL = None
+# else:
+#     print("⚠️ SQLITECLOUD_URL not set - database features disabled")
+SQLITE_URL = None  # Temporarily disabled
 
 HTTP_SERVER_PORT = 8080
 RECORDINGS_DIR = "recordings"
@@ -63,7 +64,7 @@ boson_clients = []
 boson_api_keys = []
 
 # Load all available API keys (BOSONAI_API_KEY1, BOSONAI_API_KEY2, BOSONAI_API_KEY3)
-for i in range(1, 6):
+for i in range(1, 2):
     api_key = os.getenv(f"BOSONAI_API_KEY{i}")
     if api_key:
         boson_api_keys.append(api_key)
@@ -313,7 +314,7 @@ boson_clients = []
 boson_api_keys = []
 
 # Load all available API keys (BOSONAI_API_KEY1, BOSONAI_API_KEY2, BOSONAI_API_KEY3)
-for i in range(1, 6):
+for i in range(1, 2):
     api_key = os.getenv(f"BOSONAI_API_KEY{i}")
     if api_key:
         boson_api_keys.append(api_key)
@@ -561,7 +562,7 @@ Provide only the summary, nothing else."""
         
         response = await call_bosonai_with_retry(
             "chat.completions.create",
-            model="Qwen3-14B-Hackathon",
+            model="Qwen3-32B-non-thinking-Hackathon",
             messages=[
                 {
                     "role": "system",
@@ -779,7 +780,7 @@ CRITICAL REMINDERS:
         # Call BosonAI text completion model to generate response
         response = await call_bosonai_with_retry(
             "chat.completions.create",
-            model="Qwen3-14B-Hackathon",  # Use text model instead of audio understanding
+            model="Qwen3-32B-non-thinking-Hackathon",  # Use text model instead of audio understanding
             messages=messages,
             temperature=0.2,
         )
@@ -1107,124 +1108,124 @@ async def end_call(call_sid: str):
         log(f"Error ending call: {e}")
 
 
-async def save_call_to_database(
-    call_sid: str,
-    from_number: str,
-    conversation_log: list,
-    transcripts: list,
-    recording_filename: str,
-    is_spam: bool
-):
-    """
-    Save call information to the SQLiteCloud database.
-    
-    Args:
-        call_sid: Twilio call SID
-        from_number: Caller's phone number
-        conversation_log: List of conversation exchanges
-        transcripts: List of bot responses
-        recording_filename: Path to the WAV recording file
-        is_spam: Whether the call was identified as spam
-    """
-    log(f"[SAVE] Starting database save for call {call_sid}")
-    log(f"[SAVE] Recording filename: {recording_filename}")
-    log(f"[SAVE] From number: {from_number}")
-    log(f"[SAVE] Is spam: {is_spam}")
-    
-    if not SQLITE_URL:
-        log("⚠️ Database not configured - skipping save")
-        return
-    
-    try:
-        # Extract caller name and call description from conversation
-        caller_name = "Unknown Caller"
-        description = "No conversation"
-        
-        # Try to extract name from bot responses
-        for entry in conversation_log:
-            if entry.get('speaker') == 'Bot':
-                text = entry.get('text', '')
-                # Look for patterns like "Thank you [Name]" or "Hi [Name]"
-                if 'thank you' in text.lower() or 'thanks' in text.lower() or 'hi ' in text.lower():
-                    words = text.split()
-                    for i, word in enumerate(words):
-                        if word.lower() in ['thank', 'thanks', 'hi', 'hello'] and i + 1 < len(words):
-                            potential_name = words[i + 1].strip('.,!?')
-                            if potential_name and potential_name[0].isupper() and len(potential_name) > 1:
-                                caller_name = potential_name
-                                log(f"[SAVE] Extracted caller name: {caller_name}")
-                                break
-        
-        # Create a concise, high-level description
-        if is_spam:
-            # For spam calls, create a short description
-            spam_types = {
-                'warranty': 'Car warranty scam',
-                'irs': 'IRS scam call',
-                'microsoft': 'Tech support scam',
-                'computer': 'Tech support scam',
-                'student loan': 'Student loan scam',
-                'credit card': 'Credit card offer',
-                'vacation': 'Vacation scam',
-                'prize': 'Prize scam',
-                'social security': 'Social Security scam'
-            }
-            
-            # Check transcripts for spam keywords
-            description = "Spam call"
-            if transcripts:
-                transcript_text = ' '.join(transcripts).lower()
-                for keyword, desc in spam_types.items():
-                    if keyword in transcript_text:
-                        description = desc
-                        break
-        else:
-            # For legitimate calls, extract the main topic
-            if transcripts and len(transcripts) > 0:
-                # Get the caller's stated purpose from the conversation
-                first_response = transcripts[0].replace("FORWARD_CALL", "").replace("END_CALL", "").strip()
-                
-                # Extract key phrases
-                if 'hackathon' in first_response.lower():
-                    description = "Hackathon related inquiry"
-                elif 'project' in first_response.lower():
-                    description = "Project discussion"
-                elif 'meeting' in first_response.lower():
-                    description = "Meeting request"
-                elif 'interview' in first_response.lower():
-                    description = "Interview scheduled"
-                else:
-                    # Take first sentence as description (limit to 60 chars)
-                    sentences = first_response.split('.')
-                    if sentences:
-                        description = sentences[0].strip()
-                        if len(description) > 60:
-                            description = description[:60] + "..."
-        
-        log(f"[SAVE] Caller: {caller_name}")
-        log(f"[SAVE] Description: {description}")
-        
-        # Create Voicemail object
-        voicemail = Voicemail(
-            id=0,  # Will be auto-generated by database
-            number=from_number if from_number and from_number != 'unknown' and from_number != 'Unknown' else 'Unknown Number',
-            name=caller_name,
-            description=description,
-            spam=is_spam,
-            date=datetime.now(timezone.utc),
-            unread=True,
-            recording=recording_filename
-        )
-        
-        log(f"[SAVE] Calling add_row() to save to database...")
-        # Save to database
-        add_row(SQLITE_URL, voicemail)
-        log(f"✅ Call saved to database: {caller_name} ({from_number}) - Spam: {is_spam}")
-        
-    except Exception as e:
-        log(f"❌ Failed to save call to database: {e}")
-        import traceback
-        traceback.print_exc()
+# async def save_call_to_database(
+#     call_sid: str,
+#     from_number: str,
+#     conversation_log: list,
+#     transcripts: list,
+#     recording_filename: str,
+#     is_spam: bool
+# ):
+#     """
+#     Save call information to the SQLiteCloud database.
+#     
+#     Args:
+#         call_sid: Twilio call SID
+#         from_number: Caller's phone number
+#         conversation_log: List of conversation exchanges
+#         transcripts: List of bot responses
+#         recording_filename: Path to the WAV recording file
+#         is_spam: Whether the call was identified as spam
+#     """
+#     log(f"[SAVE] Starting database save for call {call_sid}")
+#     log(f"[SAVE] Recording filename: {recording_filename}")
+#     log(f"[SAVE] From number: {from_number}")
+#     log(f"[SAVE] Is spam: {is_spam}")
+#     
+#     if not SQLITE_URL:
+#         log("⚠️ Database not configured - skipping save")
+#         return
+#     
+#     try:
+#         # Extract caller name and call description from conversation
+#         caller_name = "Unknown Caller"
+#         description = "No conversation"
+#         
+#         # Try to extract name from bot responses
+#         for entry in conversation_log:
+#             if entry.get('speaker') == 'Bot':
+#                 text = entry.get('text', '')
+#                 # Look for patterns like "Thank you [Name]" or "Hi [Name]"
+#                 if 'thank you' in text.lower() or 'thanks' in text.lower() or 'hi ' in text.lower():
+#                     words = text.split()
+#                     for i, word in enumerate(words):
+#                         if word.lower() in ['thank', 'thanks', 'hi', 'hello'] and i + 1 < len(words):
+#                             potential_name = words[i + 1].strip('.,!?')
+#                             if potential_name and potential_name[0].isupper() and len(potential_name) > 1:
+#                                 caller_name = potential_name
+#                                 log(f"[SAVE] Extracted caller name: {caller_name}")
+#                                 break
+#         
+#         # Create a concise, high-level description
+#         if is_spam:
+#             # For spam calls, create a short description
+#             spam_types = {
+#                 'warranty': 'Car warranty scam',
+#                 'irs': 'IRS scam call',
+#                 'microsoft': 'Tech support scam',
+#                 'computer': 'Tech support scam',
+#                 'student loan': 'Student loan scam',
+#                 'credit card': 'Credit card offer',
+#                 'vacation': 'Vacation scam',
+#                 'prize': 'Prize scam',
+#                 'social security': 'Social Security scam'
+#             }
+#             
+#             # Check transcripts for spam keywords
+#             description = "Spam call"
+#             if transcripts:
+#                 transcript_text = ' '.join(transcripts).lower()
+#                 for keyword, desc in spam_types.items():
+#                     if keyword in transcript_text:
+#                         description = desc
+#                         break
+#         else:
+#             # For legitimate calls, extract the main topic
+#             if transcripts and len(transcripts) > 0:
+#                 # Get the caller's stated purpose from the conversation
+#                 first_response = transcripts[0].replace("FORWARD_CALL", "").replace("END_CALL", "").strip()
+#                 
+#                 # Extract key phrases
+#                 if 'hackathon' in first_response.lower():
+#                     description = "Hackathon related inquiry"
+#                 elif 'project' in first_response.lower():
+#                     description = "Project discussion"
+#                 elif 'meeting' in first_response.lower():
+#                     description = "Meeting request"
+#                 elif 'interview' in first_response.lower():
+#                     description = "Interview scheduled"
+#                 else:
+#                     # Take first sentence as description (limit to 60 chars)
+#                     sentences = first_response.split('.')
+#                     if sentences:
+#                         description = sentences[0].strip()
+#                         if len(description) > 60:
+#                             description = description[:60] + "..."
+#         
+#         log(f"[SAVE] Caller: {caller_name}")
+#         log(f"[SAVE] Description: {description}")
+#         
+#         # Create Voicemail object
+#         voicemail = Voicemail(
+#             id=0,  # Will be auto-generated by database
+#             number=from_number if from_number and from_number != 'unknown' and from_number != 'Unknown' else 'Unknown Number',
+#             name=caller_name,
+#             description=description,
+#             spam=is_spam,
+#             date=datetime.now(timezone.utc),
+#             unread=True,
+#             recording=recording_filename
+#         )
+#         
+#         log(f"[SAVE] Calling add_row() to save to database...")
+#         # Save to database
+#         add_row(SQLITE_URL, voicemail)
+#         log(f"✅ Call saved to database: {caller_name} ({from_number}) - Spam: {is_spam}")
+#         
+#     except Exception as e:
+#         log(f"❌ Failed to save call to database: {e}")
+#         import traceback
+#         traceback.print_exc()
 
 
 class VadProcessor:
@@ -1668,24 +1669,24 @@ async def media_stream(websocket: WebSocket):
         if conversation_log and call_sid:
             save_transcript(call_sid, from_number, conversation_log, call_start_time, call_end_time, final_action, call_in_progress=False)
         # Determine if call was spam based on conversation
-        is_spam = False
-        for entry in conversation_log:
-            if entry.get('speaker') == 'Bot':
-                text = entry.get('text', '').lower()
-                if 'spam' in text or 'end_call' in text or 'scam' in text:
-                    is_spam = True
-                    break
+        # is_spam = False
+        # for entry in conversation_log:
+        #     if entry.get('speaker') == 'Bot':
+        #         text = entry.get('text', '').lower()
+        #         if 'spam' in text or 'end_call' in text or 'scam' in text:
+        #             is_spam = True
+        #             break
         
         # Save call to database
-        if call_sid and recording_filename:
-            await save_call_to_database(
-                call_sid=call_sid,
-                from_number=from_number,
-                conversation_log=conversation_log,
-                transcripts=transcripts,
-                recording_filename=recording_filename,
-                is_spam=is_spam
-            )
+        # if call_sid and recording_filename:
+        #     await save_call_to_database(
+        #         call_sid=call_sid,
+        #         from_number=from_number,
+        #         conversation_log=conversation_log,
+        #         transcripts=transcripts,
+        #         recording_filename=recording_filename,
+        #         is_spam=is_spam
+        #     )
         
         # Log full conversation
         if conversation_log:
@@ -1715,9 +1716,22 @@ async def media_stream(websocket: WebSocket):
         log(f"Connection closed. Received a total of {count} messages")
 
 
-@app.get("/")
-async def root():
-    """Health check endpoint"""
+@app.api_route("/", methods=["GET", "POST"])
+async def root(request: Request):
+    """Health check endpoint - accepts both GET and POST"""
+    if request.method == "POST":
+        # If Twilio is POSTing to root, return TwiML
+        host = request.headers.get('host', f'localhost:{HTTP_SERVER_PORT}')
+        protocol = 'wss' if request.url.scheme == 'https' else 'ws'
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{protocol}://{host}/media-stream" />
+    </Connect>
+</Response>"""
+        return Response(content=twiml, media_type="application/xml")
+    
+    # GET request - return JSON status
     return {
         "status": "running",
         "message": "Twilio Media Stream FastAPI Server",
@@ -1731,61 +1745,73 @@ async def root():
     }
 
 
-@app.get("/voicemails")
-async def get_voicemails():
-    """Retrieve all voicemails from the database"""
-    log("[API] GET /voicemails - Fetching voicemails from database")
-    
-    if not SQLITE_URL:
-        log("[API] ERROR: Database not configured")
-        return {"error": "Database not configured"}
-    
-    try:
-        from database.db_actions import read_table
-        voicemails = read_table(SQLITE_URL)
-        
-        log(f"[API] Retrieved {len(voicemails)} voicemails from database")
-        
-        # Convert to JSON-serializable format
-        result = []
-        for vm in voicemails:
-            result.append({
-                "id": vm.id,
-                "number": vm.number,
-                "name": vm.name,
-                "description": vm.description,
-                "spam": vm.spam,
-                "date": vm.date.isoformat(),
-                "unread": vm.unread,
-                "recording": vm.recording
-            })
-        
-        log(f"[API] Returning {len(result)} voicemails to frontend")
-        return {"voicemails": result, "count": len(result)}
-    except Exception as e:
-        log(f"[API] ERROR fetching voicemails: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}
+@app.api_route("/status-callback", methods=["GET", "POST"])
+async def status_callback(request: Request):
+    """Handle Twilio status callbacks (for call status updates)"""
+    return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
 
 
-@app.get("/voicemail/{voicemail_id}/recording")
-async def get_voicemail_recording(voicemail_id: int):
-    """Get the audio recording for a specific voicemail"""
-    if not SQLITE_URL:
-        return {"error": "Database not configured"}
-    
-    try:
-        from database.db_actions import get_recording
-        recording_bytes = get_recording(SQLITE_URL, voicemail_id)
-        
-        if recording_bytes:
-            from fastapi.responses import Response
-            return Response(content=recording_bytes, media_type="audio/wav")
-        else:
-            return {"error": "Recording not found"}
-    except Exception as e:
-        return {"error": str(e)}
+@app.api_route("/call-events", methods=["GET", "POST"])
+async def call_events(request: Request):
+    """Handle any call event webhooks from Twilio"""
+    return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>', media_type="application/xml")
+
+
+# @app.get("/voicemails")
+# async def get_voicemails():
+#     """Retrieve all voicemails from the database"""
+#     log("[API] GET /voicemails - Fetching voicemails from database")
+#     
+#     if not SQLITE_URL:
+#         log("[API] ERROR: Database not configured")
+#         return {"error": "Database not configured"}
+#     
+#     try:
+#         from database.db_actions import read_table
+#         voicemails = read_table(SQLITE_URL)
+#         
+#         log(f"[API] Retrieved {len(voicemails)} voicemails from database")
+#         
+#         # Convert to JSON-serializable format
+#         result = []
+#         for vm in voicemails:
+#             result.append({
+#                 "id": vm.id,
+#                 "number": vm.number,
+#                 "name": vm.name,
+#                 "description": vm.description,
+#                 "spam": vm.spam,
+#                 "date": vm.date.isoformat(),
+#                 "unread": vm.unread,
+#                 "recording": vm.recording
+#             })
+#         
+#         log(f"[API] Returning {len(result)} voicemails to frontend")
+#         return {"voicemails": result, "count": len(result)}
+#     except Exception as e:
+#         log(f"[API] ERROR fetching voicemails: {e}")
+#         import traceback
+#         traceback.print_exc()
+#         return {"error": str(e)}
+
+
+# @app.get("/voicemail/{voicemail_id}/recording")
+# async def get_voicemail_recording(voicemail_id: int):
+#     """Get the audio recording for a specific voicemail"""
+#     if not SQLITE_URL:
+#         return {"error": "Database not configured"}
+#     
+#     try:
+#         from database.db_actions import get_recording
+#         recording_bytes = get_recording(SQLITE_URL, voicemail_id)
+#         
+#         if recording_bytes:
+#             from fastapi.responses import Response
+#             return Response(content=recording_bytes, media_type="audio/wav")
+#         else:
+#             return {"error": "Recording not found"}
+#     except Exception as e:
+#         return {"error": str(e)}
 
 
 if __name__ == '__main__':
