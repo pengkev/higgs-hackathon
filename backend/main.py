@@ -12,7 +12,7 @@ import wave
 import webrtcvad
 import openai
 from dotenv import load_dotenv
-from gcal import get_current_event, book_next_available
+# from gcal import get_current_event, book_next_available
 
 # Import database functions
 # from database.db_actions import init_db, add_row, Voicemail
@@ -154,6 +154,95 @@ async def call_bosonai(func_name: str, model: str, **kwargs):
         return None
 
 
+def remove_emojis(text: str) -> str:
+    """
+    Remove all emojis from text for TTS generation.
+    
+    Returns:
+        Text with emojis removed
+    """
+    import re
+    
+    # Emoji pattern - matches most common emojis
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport & map symbols
+        "\U0001F1E0-\U0001F1FF"  # flags
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "]+"
+    )
+    
+    # Remove emojis and clean up extra whitespace
+    clean_text = emoji_pattern.sub('', text)
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    return clean_text
+
+
+def extract_emojis_and_emotion(text: str) -> tuple[list[str], str]:
+    """
+    Extract emojis from text and map them to an emotion description.
+    
+    Returns:
+        tuple: (list of emojis found, emotion description)
+    """
+    import re
+    
+    # Emoji pattern - matches most common emojis
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport & map symbols
+        "\U0001F1E0-\U0001F1FF"  # flags
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "]+"
+    )
+    
+    emojis = emoji_pattern.findall(text)
+    
+    # Emoji to emotion mapping
+    emoji_emotion_map = {
+        '😊': 'warm and friendly',
+        '😁': 'enthusiastic and cheerful',
+        '😂': 'amused and lighthearted',
+        '😐': 'neutral and professional',
+        '😕': 'concerned and empathetic',
+        '😨': 'worried and cautious',
+        '😡': 'frustrated and firm',
+        '🤬': 'angry and assertive',
+        '😤': 'annoyed and direct',
+        '🤔': 'thoughtful and curious',
+        '😌': 'calm and reassuring',
+        '😒': 'skeptical and cautious',
+        '🙄': 'dismissive and firm',
+        '😴': 'uninterested and brief',
+        '🤒': 'sympathetic and gentle',
+        '😇': 'kind and helpful',
+        '😎': 'confident and cool',
+        '🤗': 'welcoming and warm',
+        '🤝': 'cooperative and professional',
+        '👍': 'positive and encouraging',
+        '❤️': 'warm and caring',
+        '💼': 'professional and business-like',
+        '⚠️': 'cautious and alert',
+        '🚫': 'firm and restrictive',
+    }
+    
+    # Determine overall emotion from emojis
+    if not emojis:
+        return [], "neutral and professional"
+    
+    # Use the first emoji's emotion (most prominent)
+    first_emoji = emojis[0]
+    emotion = emoji_emotion_map.get(first_emoji, "neutral and professional")
+    
+    return emojis, emotion
+
+
 def extract_caller_name(conversation_history: list, latest_transcription: str) -> str:
     """
     Extract caller's name from conversation history.
@@ -232,13 +321,16 @@ def save_transcript(call_sid: str, from_number: str, conversation_log: list, cal
                     "speaker": "Caller",
                     "duration_ms": entry.get('duration_ms', 0),
                     "audio_size_bytes": entry.get('audio_size', 0),
-                    "text": caller_text if caller_text else "[Transcription not available]"
+                    "text": caller_text if caller_text else "[Transcription not available]",
+                    "emojis": entry.get('emojis', []),
+                    "detected_emotion": entry.get('detected_emotion', '')
                 })
             else:  # Bot
                 transcript_data['conversation'].append({
                     "speaker": "AI Receptionist",
                     "text": entry.get('text', ''),
-                    "timestamp": entry.get('timestamp', '')
+                    "timestamp": entry.get('timestamp', ''),
+                    "emotion_used": entry.get('emotion_used', '')
                 })
         
         # Save to JSON file
@@ -269,13 +361,19 @@ def save_transcript(call_sid: str, from_number: str, conversation_log: list, cal
                 if entry['speaker'] == 'Caller':
                     caller_text = entry.get('text', None)
                     duration = entry.get('duration_ms', 0)
+                    emojis = entry.get('emojis', [])
+                    detected_emotion = entry.get('detected_emotion', '')
                     if caller_text:
-                        f.write(f"[{i}] CALLER: {caller_text}\n\n")
+                        emoji_str = f" {' '.join(emojis)}" if emojis else ""
+                        emotion_str = f" [Emotion: {detected_emotion}]" if detected_emotion else ""
+                        f.write(f"[{i}] CALLER{emoji_str}: {caller_text}{emotion_str}\n\n")
                     else:
                         f.write(f"[{i}] CALLER: [Spoke for {duration}ms - transcription unavailable]\n\n")
                 else:
                     text = entry.get('text', '')
-                    f.write(f"[{i}] AI RECEPTIONIST: {text}\n\n")
+                    emotion_used = entry.get('emotion_used', '')
+                    emotion_str = f" [Responded with: {emotion_used}]" if emotion_used else ""
+                    f.write(f"[{i}] AI RECEPTIONIST{emotion_str}: {text}\n\n")
         
         log(f"📄 Human-readable transcript saved: {txt_filename}")
         
@@ -298,6 +396,61 @@ def pcm16_16k_to_mulaw8k(pcm16_16k: bytes) -> bytes:
     """Downsample PCM16 16 kHz → 8 kHz, then encode to μ-law for Twilio."""
     pcm16_8k, _ = audioop.ratecv(pcm16_16k, 2, 1, 16000, 8000, None)
     return audioop.lin2ulaw(pcm16_8k, 2)
+
+
+async def generate_speech_with_emotion(text: str, emotion: str = "neutral and professional"):
+    """Generate speech with specified emotion using the chat completions API.
+    
+    Args:
+        text: The text to convert to speech
+        emotion: The emotion to convey (e.g., "friendly and professional", "excited", "calm", "apologetic")
+    
+    Returns:
+        Response object with PCM audio content, or None if failed
+    """
+    try:
+        # Use chat completions API with modalities for emotion control
+        messages = [
+            {
+                "role": "system",
+                "content": f"Convert the following text into speech with a {emotion} tone."
+            },
+            {
+                "role": "user",
+                "content": text
+            }
+        ]
+        
+        response = await call_bosonai(
+            "chat.completions.create",
+            model="higgs-audio-generation-Hackathon",
+            messages=messages
+        )
+        
+        if not response:
+            return None
+        
+        # Extract audio data from response
+        if hasattr(response.choices[0].message, 'audio') and response.choices[0].message.audio:
+            audio_data = response.choices[0].message.audio
+            # Decode base64 audio data
+            pcm_data = base64.b64decode(audio_data['data'])
+            
+            # Create a response object compatible with existing code
+            class AudioResponse:
+                def __init__(self, content):
+                    self.content = content
+            
+            return AudioResponse(pcm_data)
+        else:
+            log("No audio data in response")
+            return None
+            
+    except Exception as e:
+        log(f"Error generating speech with emotion: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 async def get_call_info(call_sid: str) -> dict:
@@ -450,14 +603,18 @@ async def generate_call_summary(conversation: list) -> str:
 
 
 async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, stream_sid: str, conversation_history: list, call_sid: str, exchange_count: int = 0):
-    """Process user utterance and generate/send response."""
-    if not boson_clients:
-        return None, None, None, None, 0.0
-async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, stream_sid: str, conversation_history: list, call_sid: str, wav_file=None, exchange_count: int = 0):
     """Send PCM16 16kHz audio to BosonAI and stream response back to Twilio."""
     if not asr_tts_client or not qwen_client:
         log("[BosonAI not configured - set BOSONAI_API_KEY1 and BOSONAI_API_KEY2 env vars]")
-        return None, None, None, None
+        return None, None, None, None, 0.0
+    
+    # Initialize variables that might be used in conversation history
+    caller_emojis = []
+    caller_detected_emotion = None
+    emotion = "friendly and professional"
+    
+    import time
+    total_start = time.time()
     
     try:
         # Save audio chunk to temporary WAV file (following example1.py pattern)
@@ -496,12 +653,16 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
             }
         ]
         
+        import time
+        asr_start = time.time()
         transcription_response = await call_bosonai(
             "chat.completions.create",
             model="higgs-audio-understanding-Hackathon",
             messages=transcription_messages,
             temperature=0.3,  # Lower temperature for accurate transcription
         )
+        asr_duration = time.time() - asr_start
+        log(f"⏱️ ASR transcription took {asr_duration:.3f}s")
         
         if not transcription_response:
             log("Failed to get transcription from BosonAI (all API keys failed or timed out)")
@@ -515,24 +676,29 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         
         log(f"📝 Caller said: \"{caller_transcription}\"")
         
+        # Extract emojis and detect emotion from transcription
+        caller_emojis, caller_detected_emotion = extract_emojis_and_emotion(caller_transcription)
+        if caller_emojis:
+            log(f"😊 Detected emojis: {caller_emojis} → Emotion: {caller_detected_emotion}")
+        
         # STEP 2: Use transcription to generate response
         log("Step 2: Generating AI response from transcription...")
         
         # Get current calendar event status
-        current_event_info = get_current_event()
-        log(f"📅 Calendar status: {current_event_info}")
+        # current_event_info = get_current_event()
+        # log(f"📅 Calendar status: {current_event_info}")
         
         # Build messages with conversation history
-        calendar_context = ""
-        if current_event_info and current_event_info != "No current events":
-            calendar_context = f"\n\nCALENDAR STATUS:\nBosonAI is currently in: {current_event_info}\n\nFor legitimate callers, if BosonAI is busy, offer to book them at the next available time instead of forwarding. Use the command BOOK_MEETING on a new line after your response."
-        else:
-            calendar_context = f"\n\nCALENDAR STATUS:\nBosonAI is available right now (no current meetings).\n\nFor legitimate callers, you can forward them directly."
+        # calendar_context = ""
+        # if current_event_info and current_event_info != "No current events":
+        #     calendar_context = f"\n\nCALENDAR STATUS:\nBosonAI is currently in: {current_event_info}\n\nFor legitimate callers, if BosonAI is busy, offer to book them at the next available time instead of forwarding. Use the command BOOK_MEETING on a new line after your response."
+        # else:
+        #     calendar_context = f"\n\nCALENDAR STATUS:\nBosonAI is available right now (no current meetings).\n\nFor legitimate callers, you can forward them directly."
         
         messages = [
             {
                 "role": "system",
-                "content": f"{PROMPTS['receptionist']}{calendar_context}"
+                "content": PROMPTS['receptionist']
             }
         ]
         
@@ -546,12 +712,15 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         })
         
         # Call BosonAI text completion model to generate response
+        llm_start = time.time()
         response = await call_bosonai(
             "chat.completions.create",
             model="Qwen3-32B-non-thinking-Hackathon",  # Use text model instead of audio understanding
             messages=messages,
             temperature=0.2,
         )
+        llm_duration = time.time() - llm_start
+        log(f"⏱️ LLM response generation took {llm_duration:.3f}s")
         
         if not response:
             log("Failed to get response from BosonAI (all API keys failed or timed out)")
@@ -591,14 +760,14 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
                 action = None  # Suppress action until minimum exchanges reached
             else:
                 log("⚡ ACTION: Forwarding call to BosonAI's phone")
-        elif "BOOK_MEETING" in model_response_clean:
-            action = "BOOK"
-            response_text = model_response_clean.replace("BOOK_MEETING", "").strip()
-            log("⚡ ACTION: Booking meeting at next available time")
-            
-            # Extract caller name from conversation history
-            caller_name = extract_caller_name(conversation_history, caller_transcription)
-            log(f"📝 Extracted caller name: {caller_name}")
+        # elif "BOOK_MEETING" in model_response_clean:
+        #     action = "BOOK"
+        #     response_text = model_response_clean.replace("BOOK_MEETING", "").strip()
+        #     log("⚡ ACTION: Booking meeting at next available time")
+        #     
+        #     # Extract caller name from conversation history
+        #     caller_name = extract_caller_name(conversation_history, caller_transcription)
+        #     log(f"📝 Extracted caller name: {caller_name}")
         elif "END_CALL" in model_response_clean:
             action = "END"
             response_text = model_response_clean.replace("END_CALL", "").strip()
@@ -642,29 +811,59 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         # Add to conversation history (caller's transcribed text + assistant's response)
         conversation_history.append({
             "role": "user",
-            "content": caller_transcription
+            "content": caller_transcription,
+            "emojis": caller_emojis,
+            "detected_emotion": caller_detected_emotion
         })
         conversation_history.append({
             "role": "assistant",
-            "content": response_text
+            "content": response_text,
+            "emotion_used": emotion
         })
         
         # Generate speech from text response (following example1.py pattern)
         log("Step 3: Generating speech from response...")
         
         # Remove content in brackets before TTS (stage directions, actions, etc.)
-        # Remove [text], (text), and {text} patterns
+        # Remove [text], (text), and {text} patterns, and emojis
         import re
         tts_text = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', response_text).strip()
-        log(f"TTS input (brackets removed): {tts_text}")
+        tts_text = remove_emojis(tts_text)  # Remove emojis for clean TTS
+        log(f"TTS input (cleaned): {tts_text}")
         
-        speech_response = await call_bosonai(
-            "audio.speech.create",
-            model="higgs-audio-generation-Hackathon",
-            voice=VOICE,
-            input=tts_text,
-            response_format="pcm"
+        # Determine emotion based on action, context, and caller's detected emotion
+        emotion = "friendly and professional"
+        
+        # First, check for action-based emotions (higher priority)
+        if action == "END":
+            emotion = "polite but firm"
+        elif action == "FORWARD":
+            emotion = "helpful and warm"
+        # elif action == "BOOK":
+        #     emotion = "enthusiastic and helpful"
+        # Then adapt to caller's emotion if detected
+        elif caller_detected_emotion and caller_detected_emotion != "neutral and professional":
+            # Mirror or respond appropriately to caller's emotion
+            if "angry" in caller_detected_emotion or "frustrated" in caller_detected_emotion:
+                emotion = "calm and reassuring"
+            elif "worried" in caller_detected_emotion or "concerned" in caller_detected_emotion:
+                emotion = "empathetic and supportive"
+            elif "enthusiastic" in caller_detected_emotion or "cheerful" in caller_detected_emotion:
+                emotion = "warm and encouraging"
+            else:
+                emotion = caller_detected_emotion
+        elif "?" in response_text:
+            emotion = "curious and engaging"
+        
+        log(f"Using emotion: {emotion} (caller emotion: {caller_detected_emotion})")
+        
+        tts_start = time.time()
+        speech_response = await generate_speech_with_emotion(
+            text=tts_text,
+            emotion=emotion
         )
+        tts_duration = time.time() - tts_start
+        log(f"⏱️ TTS audio generation took {tts_duration:.3f}s")
         
         if not speech_response:
             log("Failed to generate speech from BosonAI (all API keys failed or timed out)")
@@ -721,65 +920,62 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         if action == "FORWARD":
             log(f"📞 Forwarding call {call_sid} to {BOSONAI_PHONE_NUMBER}")
             await forward_call(call_sid)
-        elif action == "BOOK":
-            log(f"📅 Booking meeting for {caller_name}")
-            booking_result = book_next_available(caller_name, caller_phone="", caller_email="")
-            log(f"✅ Booking result: {booking_result}")
-            
-            # Send confirmation message to caller
-            confirmation_text = f"Perfect! I've scheduled you for a 15-minute call with BosonAI. {booking_result}. You'll receive a confirmation. Thank you for calling!"
-            
-            # Remove content in brackets before TTS
-            import re
-            confirmation_tts = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', confirmation_text).strip()
-            
-            # Generate speech for confirmation
-            speech_response = await call_bosonai(
-                "audio.speech.create",
-                model="higgs-audio-generation-Hackathon",
-                voice=VOICE,
-                input=confirmation_tts,
-                response_format="pcm"
-            )
-            
-            if not speech_response:
-                log("Failed to generate confirmation speech from BosonAI (all API keys failed or timed out)")
-                # Still try to end the call even if speech failed
-            else:
-                pcm_data = speech_response.content
-                pcm16_8k_confirmation, _ = audioop.ratecv(pcm_data, 2, 1, 24000, 8000, None)
-                
-                # Calculate confirmation audio duration
-                confirmation_duration_seconds = len(pcm16_8k_confirmation) / (8000 * 2)
-                log(f"Confirmation audio duration: {confirmation_duration_seconds:.2f} seconds")
-                
-                # Send confirmation to caller
-                chunk_size = 1600
-                for i in range(0, len(pcm16_8k_confirmation), chunk_size):
-                    chunk = pcm16_8k_confirmation[i:i + chunk_size]
-                    if len(chunk) < 4:
-                        continue
-                    mulaw_8k = audioop.lin2ulaw(chunk, 2)
-                    await websocket.send_text(json.dumps({
-                        "event": "media",
-                        "streamSid": stream_sid,
-                        "media": {
-                            "payload": base64.b64encode(mulaw_8k).decode("utf-8")
-                        }
-                    }))
-                
-                # Wait for confirmation to play completely
-                confirmation_duration_seconds = len(pcm16_8k_confirmation) / (8000 * 2)
-                log(f"Confirmation will play for {confirmation_duration_seconds:.2f} seconds...")
-                
-                # Actually wait for the audio to finish playing
-                import asyncio
-                wait_time = confirmation_duration_seconds + 0.5  # Audio duration + small buffer
-                log(f"⏳ Waiting {wait_time:.2f}s for confirmation to finish before ending call...")
-                await asyncio.sleep(wait_time)
-            
-            # End the call after booking (and after confirmation finishes playing)
-            await end_call(call_sid)
+        # elif action == "BOOK":
+        #     log(f"📅 Booking meeting for {caller_name}")
+        #     booking_result = book_next_available(caller_name, caller_phone="", caller_email="")
+        #     log(f"✅ Booking result: {booking_result}")
+        #     
+        #     # Send confirmation message to caller
+        #     confirmation_text = f"Perfect! I've scheduled you for a 15-minute call with BosonAI. {booking_result}. You'll receive a confirmation. Thank you for calling!"
+        #     
+        #     # Remove content in brackets before TTS
+        #     import re
+        #     confirmation_tts = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', confirmation_text).strip()
+        #     
+        #     # Generate speech for confirmation with enthusiastic tone
+        #     speech_response = await generate_speech_with_emotion(
+        #         text=confirmation_tts,
+        #         emotion="enthusiastic and helpful"
+        #     )
+        #     
+        #     if not speech_response:
+        #         log("Failed to generate confirmation speech from BosonAI (all API keys failed or timed out)")
+        #         # Still try to end the call even if speech failed
+        #     else:
+        #         pcm_data = speech_response.content
+        #         pcm16_8k_confirmation, _ = audioop.ratecv(pcm_data, 2, 1, 24000, 8000, None)
+        #         
+        #         # Calculate confirmation audio duration
+        #         confirmation_duration_seconds = len(pcm16_8k_confirmation) / (8000 * 2)
+        #         log(f"Confirmation audio duration: {confirmation_duration_seconds:.2f} seconds")
+        #         
+        #         # Send confirmation to caller
+        #         chunk_size = 1600
+        #         for i in range(0, len(pcm16_8k_confirmation), chunk_size):
+        #             chunk = pcm16_8k_confirmation[i:i + chunk_size]
+        #             if len(chunk) < 4:
+        #                 continue
+        #             mulaw_8k = audioop.lin2ulaw(chunk, 2)
+        #             await websocket.send_text(json.dumps({
+        #                 "event": "media",
+        #                 "streamSid": stream_sid,
+        #                 "media": {
+        #                     "payload": base64.b64encode(mulaw_8k).decode("utf-8")
+        #                 }
+        #             }))
+        #         
+        #         # Wait for confirmation to play completely
+        #         confirmation_duration_seconds = len(pcm16_8k_confirmation) / (8000 * 2)
+        #         log(f"Confirmation will play for {confirmation_duration_seconds:.2f} seconds...")
+        #         
+        #         # Actually wait for the audio to finish playing
+        #         import asyncio
+        #         wait_time = confirmation_duration_seconds + 0.5  # Audio duration + small buffer
+        #         log(f"⏳ Waiting {wait_time:.2f}s for confirmation to finish before ending call...")
+        #         await asyncio.sleep(wait_time)
+        #     
+        #     # End the call after booking (and after confirmation finishes playing)
+        #     await end_call(call_sid)
         elif action == "END":
             log(f"🚫 Ending call {call_sid} (spam)")
             # Wait for the goodbye message to finish playing before hanging up
@@ -789,6 +985,10 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
             log(f"⏳ Waiting {wait_time:.2f}s for goodbye message to finish before ending call...")
             await asyncio.sleep(wait_time)
             await end_call(call_sid)
+        
+        # Log total processing time
+        total_duration = time.time() - total_start
+        log(f"⏱️ TOTAL processing time: {total_duration:.3f}s (ASR: {asr_duration:.3f}s, LLM: {llm_duration:.3f}s, TTS: {tts_duration:.3f}s)")
         
         # Return total delay duration for blocking user input
         return model_response, pcm16_8k_full, action, caller_transcription, total_delay_seconds
@@ -1064,24 +1264,26 @@ async def return_twiml(request: Request):
 async def send_greeting(websocket: WebSocket, stream_sid: str):
     """Send initial greeting when call starts."""
     if not asr_tts_client:
-        return
+        return None, 0.0, None
     
     try:
         greeting_text = "Hi, you've reached the office of BosonAI. How can I help you today?"
         log(f"Sending greeting: {greeting_text}")
         
-        # Remove content in brackets before TTS
+        # Remove content in brackets and emojis before TTS
         import re
         greeting_tts = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', greeting_text).strip()
+        greeting_tts = remove_emojis(greeting_tts)
         
-        # Generate speech from greeting
-        speech_response = await call_bosonai(
-            "audio.speech.create",
-            model="higgs-audio-generation-Hackathon",
-            voice=VOICE,
-            input=greeting_tts,
-            response_format="pcm"
+        # Generate speech from greeting with professional, friendly emotion
+        import time
+        greeting_tts_start = time.time()
+        speech_response = await generate_speech_with_emotion(
+            text=greeting_tts,
+            emotion="friendly and professional"
         )
+        greeting_tts_duration = time.time() - greeting_tts_start
+        log(f"⏱️ Greeting TTS generation took {greeting_tts_duration:.3f}s")
         
         if not speech_response:
             log("Failed to generate greeting from BosonAI (all API keys failed or timed out)")
@@ -1193,18 +1395,21 @@ async def media_stream(websocket: WebSocket):
                 # Track final action
                 if action:
                     final_action = action
-                # Log the exchange with caller transcription
+                # Log the exchange with caller transcription and emotion data
                 conversation_log.append({
                     "speaker": "Caller",
                     "duration_ms": speech_duration_ms,
                     "audio_size": len(pcm16_16k),
                     "text": caller_text if caller_text else None,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                    "emojis": conversation_history[-2].get('emojis', []) if len(conversation_history) >= 2 else [],
+                    "detected_emotion": conversation_history[-2].get('detected_emotion', '') if len(conversation_history) >= 2 else ''
                 })
                 conversation_log.append({
                     "speaker": "Bot",
                     "text": clean_text_for_transcript(response),
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                    "emotion_used": conversation_history[-1].get('emotion_used', '') if conversation_history else ''
                 })
                 
                 # Add bot audio to buffer for stereo recording
