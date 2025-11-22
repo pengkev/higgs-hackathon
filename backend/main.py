@@ -63,29 +63,32 @@ def log(msg, *args):
     print(f"Media WS: {msg}", *args)
 
 
-# Initialize BosonAI clients with multiple API keys for cycling
-boson_clients = []
-boson_api_keys = []
+# Initialize BosonAI clients - dedicated keys for different purposes
+# API_KEY1: ASR/TTS (audio understanding and generation)
+# API_KEY2: Qwen (text completion)
+asr_tts_client = None
+qwen_client = None
 
-# Load all available API keys (BOSONAI_API_KEY1, BOSONAI_API_KEY2, BOSONAI_API_KEY3)
-for i in range(1, 2):
-    api_key = os.getenv(f"BOSONAI_API_KEY{i}")
-    if api_key:
-        boson_api_keys.append(api_key)
-        boson_clients.append(openai.Client(
-            api_key=api_key,
-            base_url="https://hackathon.boson.ai/v1"
-        ))
-        log(f"Loaded BosonAI API key #{i}")
-
-# Fallback to single BOSONAI_API_KEY if numbered keys not found
-if not boson_clients and os.getenv("BOSONAI_API_KEY"):
-    boson_api_keys.append(os.getenv("BOSONAI_API_KEY"))
-    boson_clients.append(openai.Client(
-        api_key=os.getenv("BOSONAI_API_KEY"),
+api_key1 = os.getenv("BOSONAI_API_KEY1")
+if api_key1:
+    asr_tts_client = openai.Client(
+        api_key=api_key1,
         base_url="https://hackathon.boson.ai/v1"
-    ))
-    log("Loaded BosonAI API key (legacy)")
+    )
+    log("✅ Loaded BosonAI API_KEY1 (ASR/TTS)")
+else:
+    log("⚠️ BOSONAI_API_KEY1 not found - ASR/TTS will not work")
+
+api_key2 = os.getenv("BOSONAI_API_KEY2")
+if api_key2:
+    qwen_client = openai.Client(
+        api_key=api_key2,
+        base_url="https://hackathon.boson.ai/v1"
+    )
+    log("✅ Loaded BosonAI API_KEY2 (Qwen)")
+else:
+    log("⚠️ BOSONAI_API_KEY2 not found - Qwen calls will not work")
+
 # Add CORS middleware to allow frontend to access the API
 app.add_middleware(
     CORSMiddleware,
@@ -95,11 +98,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Keep single client reference for backward compatibility
-boson_client = boson_clients[0] if boson_clients else None
-
-# API key cycling state
-current_key_index = 0
 API_REQUEST_TIMEOUT = 10.0  # seconds - timeout for BosonAI requests
 
 # Lock to ensure sequential API calls within same conversation turn
@@ -107,80 +105,53 @@ import asyncio
 api_call_lock = asyncio.Lock()
 
 
-async def call_bosonai_with_retry(func_name: str, use_lock: bool = True, **kwargs):
+async def call_bosonai(func_name: str, model: str, **kwargs):
     """
-    Call a BosonAI function with automatic key cycling on timeout.
-    Tries each available API key in sequence until one succeeds or all fail.
+    Call a BosonAI function using the appropriate API key based on model type.
     
     Args:
         func_name: Name of the function to call (e.g., 'chat.completions.create', 'audio.speech.create')
-        use_lock: Whether to use the lock to ensure sequential calls (default: True)
+        model: Model name to determine which API key to use
         **kwargs: Arguments to pass to the BosonAI function
     
     Returns:
-        The response from BosonAI, or None if all keys fail
+        The response from BosonAI, or None if call fails
     """
-    global current_key_index
-    
-    if not boson_clients:
-        log("[BosonAI not configured - set BOSONAI_API_KEY1/2/3 env vars]")
-        return None
-    
-    import asyncio
-    
-    # Use lock to ensure sequential calls within same conversation turn use same API key
-    async def _make_call():
-        global current_key_index
-        
-        # Try each API key in sequence
-        num_keys = len(boson_clients)
-        for attempt in range(num_keys):
-            key_idx = (current_key_index + attempt) % num_keys
-            client = boson_clients[key_idx]
-            
-            try:
-                log(f"Attempting BosonAI call with API key #{key_idx + 1} (timeout: {API_REQUEST_TIMEOUT}s)...")
-                
-                # Parse the function path (e.g., "chat.completions.create" -> client.chat.completions.create)
-                func = client
-                for part in func_name.split('.'):
-                    func = getattr(func, part)
-                
-                # Call the function with timeout
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(func, **kwargs),
-                    timeout=API_REQUEST_TIMEOUT
-                )
-                
-                # Success! Update current key index for next call
-                if key_idx != current_key_index:
-                    log(f"✅ Switched to API key #{key_idx + 1} successfully")
-                    current_key_index = key_idx
-                
-                return response
-                
-            except asyncio.TimeoutError:
-                log(f"⏱️ API key #{key_idx + 1} timed out after {API_REQUEST_TIMEOUT}s")
-                if attempt < num_keys - 1:
-                    log(f"🔄 Trying next API key...")
-                continue
-                
-            except Exception as e:
-                log(f"❌ API key #{key_idx + 1} failed: {e}")
-                if attempt < num_keys - 1:
-                    log(f"🔄 Trying next API key...")
-                continue
-        
-        # All keys failed
-        log(f"❌ All {num_keys} API keys failed")
-        return None
-    
-    # Execute with or without lock
-    if use_lock:
-        async with api_call_lock:
-            return await _make_call()
+    # Route to appropriate client based on model
+    if 'higgs-audio' in model:
+        # ASR/TTS models use API_KEY1
+        client = asr_tts_client
+        key_name = "API_KEY1 (ASR/TTS)"
     else:
-        return await _make_call()
+        # Qwen and other text models use API_KEY2
+        client = qwen_client
+        key_name = "API_KEY2 (Qwen)"
+    
+    if not client:
+        log(f"[BosonAI {key_name} not configured]")
+        return None
+    
+    try:
+        # Parse the function path (e.g., "chat.completions.create" -> client.chat.completions.create)
+        func = client
+        for part in func_name.split('.'):
+            func = getattr(func, part)
+        
+        # Call the function with timeout
+        response = await asyncio.wait_for(
+            asyncio.to_thread(func, model=model, **kwargs),
+            timeout=API_REQUEST_TIMEOUT
+        )
+        
+        return response
+        
+    except asyncio.TimeoutError:
+        log(f"⏱️ {key_name} timed out after {API_REQUEST_TIMEOUT}s")
+        return None
+        
+    except Exception as e:
+        log(f"❌ {key_name} failed: {e}")
+        return None
 
 
 def extract_caller_name(conversation_history: list, latest_transcription: str) -> str:
@@ -313,116 +284,7 @@ def save_transcript(call_sid: str, from_number: str, conversation_log: list, cal
         import traceback
         traceback.print_exc()
 
-# Initialize BosonAI clients with multiple API keys for cycling
-boson_clients = []
-boson_api_keys = []
 
-# Load all available API keys (BOSONAI_API_KEY1, BOSONAI_API_KEY2, BOSONAI_API_KEY3)
-for i in range(1, 2):
-    api_key = os.getenv(f"BOSONAI_API_KEY{i}")
-    if api_key:
-        boson_api_keys.append(api_key)
-        boson_clients.append(openai.Client(
-            api_key=api_key,
-            base_url="https://hackathon.boson.ai/v1"
-        ))
-        log(f"Loaded BosonAI API key #{i}")
-
-# Fallback to single BOSONAI_API_KEY if numbered keys not found
-if not boson_clients and os.getenv("BOSONAI_API_KEY"):
-    boson_api_keys.append(os.getenv("BOSONAI_API_KEY"))
-    boson_clients.append(openai.Client(
-        api_key=os.getenv("BOSONAI_API_KEY"),
-        base_url="https://hackathon.boson.ai/v1"
-    ))
-    log("Loaded BosonAI API key (legacy)")
-
-# Keep single client reference for backward compatibility
-boson_client = boson_clients[0] if boson_clients else None
-
-# API key cycling state
-current_key_index = 0
-API_REQUEST_TIMEOUT = 10.0  # seconds - timeout for BosonAI requests
-
-# Lock to ensure sequential API calls within same conversation turn
-import asyncio
-api_call_lock = asyncio.Lock()
-
-
-async def call_bosonai_with_retry(func_name: str, use_lock: bool = True, **kwargs):
-    """
-    Call a BosonAI function with automatic key cycling on timeout.
-    Tries each available API key in sequence until one succeeds or all fail.
-    
-    Args:
-        func_name: Name of the function to call (e.g., 'chat.completions.create', 'audio.speech.create')
-        use_lock: Whether to use the lock to ensure sequential calls (default: True)
-        **kwargs: Arguments to pass to the BosonAI function
-    
-    Returns:
-        The response from BosonAI, or None if all keys fail
-    """
-    global current_key_index
-    
-    if not boson_clients:
-        log("[BosonAI not configured - set BOSONAI_API_KEY1/2/3 env vars]")
-        return None
-    
-    import asyncio
-    
-    # Use lock to ensure sequential calls within same conversation turn use same API key
-    async def _make_call():
-        global current_key_index
-        
-        # Try each API key in sequence
-        num_keys = len(boson_clients)
-        for attempt in range(num_keys):
-            key_idx = (current_key_index + attempt) % num_keys
-            client = boson_clients[key_idx]
-            
-            try:
-                log(f"Attempting BosonAI call with API key #{key_idx + 1} (timeout: {API_REQUEST_TIMEOUT}s)...")
-                
-                # Parse the function path (e.g., "chat.completions.create" -> client.chat.completions.create)
-                func = client
-                for part in func_name.split('.'):
-                    func = getattr(func, part)
-                
-                # Call the function with timeout
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(func, **kwargs),
-                    timeout=API_REQUEST_TIMEOUT
-                )
-                
-                # Success! Update current key index for next call
-                if key_idx != current_key_index:
-                    log(f"✅ Switched to API key #{key_idx + 1} successfully")
-                    current_key_index = key_idx
-                
-                return response
-                
-            except asyncio.TimeoutError:
-                log(f"⏱️ API key #{key_idx + 1} timed out after {API_REQUEST_TIMEOUT}s")
-                if attempt < num_keys - 1:
-                    log(f"🔄 Trying next API key...")
-                continue
-                
-            except Exception as e:
-                log(f"❌ API key #{key_idx + 1} failed: {e}")
-                if attempt < num_keys - 1:
-                    log(f"🔄 Trying next API key...")
-                continue
-        
-        # All keys failed
-        log(f"❌ All {num_keys} API keys failed")
-        return None
-    
-    # Execute with or without lock
-    if use_lock:
-        async with api_call_lock:
-            return await _make_call()
-    else:
-        return await _make_call()
 
 
 def mulaw8k_to_pcm16_16k(mulaw_bytes: bytes) -> bytes:
@@ -543,7 +405,7 @@ async def generate_call_summary(conversation: list) -> str:
     Returns:
         A brief summary string describing the call
     """
-    if not boson_client or not conversation:
+    if not qwen_client or not conversation:
         return "No conversation data available"
     
     try:
@@ -557,7 +419,7 @@ async def generate_call_summary(conversation: list) -> str:
         # Prompt the AI to summarize
         summary_prompt = PROMPTS["call_summary_user_template"].format(conversation_text=conversation_text)
         
-        response = await call_bosonai_with_retry(
+        response = await call_bosonai(
             "chat.completions.create",
             model="Qwen3-32B-non-thinking-Hackathon",
             messages=[
@@ -589,8 +451,8 @@ async def generate_call_summary(conversation: list) -> str:
 
 async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, stream_sid: str, conversation_history: list, call_sid: str, wav_file=None, exchange_count: int = 0):
     """Send PCM16 16kHz audio to BosonAI and stream response back to Twilio."""
-    if not boson_client:
-        log("[BosonAI not configured - set BOSONAI_API_KEY env var]")
+    if not asr_tts_client or not qwen_client:
+        log("[BosonAI not configured - set BOSONAI_API_KEY1 and BOSONAI_API_KEY2 env vars]")
         return None, None, None, None
     
     try:
@@ -630,7 +492,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
             }
         ]
         
-        transcription_response = await call_bosonai_with_retry(
+        transcription_response = await call_bosonai(
             "chat.completions.create",
             model="higgs-audio-understanding-Hackathon",
             messages=transcription_messages,
@@ -680,7 +542,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         })
         
         # Call BosonAI text completion model to generate response
-        response = await call_bosonai_with_retry(
+        response = await call_bosonai(
             "chat.completions.create",
             model="Qwen3-32B-non-thinking-Hackathon",  # Use text model instead of audio understanding
             messages=messages,
@@ -792,7 +654,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
         tts_text = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', response_text).strip()
         log(f"TTS input (brackets removed): {tts_text}")
         
-        speech_response = await call_bosonai_with_retry(
+        speech_response = await call_bosonai(
             "audio.speech.create",
             model="higgs-audio-generation-Hackathon",
             voice=VOICE,
@@ -872,7 +734,7 @@ async def process_utterance_and_respond(pcm16_16k: bytes, websocket: WebSocket, 
             confirmation_tts = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', confirmation_text).strip()
             
             # Generate speech for confirmation
-            speech_response = await call_bosonai_with_retry(
+            speech_response = await call_bosonai(
                 "audio.speech.create",
                 model="higgs-audio-generation-Hackathon",
                 voice=VOICE,
@@ -1201,7 +1063,7 @@ async def return_twiml(request: Request):
 
 async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
     """Send initial greeting when call starts."""
-    if not boson_clients:
+    if not asr_tts_client:
         return
     
     try:
@@ -1213,7 +1075,7 @@ async def send_greeting(websocket: WebSocket, stream_sid: str, wav_file=None):
         greeting_tts = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', '', greeting_text).strip()
         
         # Generate speech from greeting
-        speech_response = await call_bosonai_with_retry(
+        speech_response = await call_bosonai(
             "audio.speech.create",
             model="higgs-audio-generation-Hackathon",
             voice=VOICE,
