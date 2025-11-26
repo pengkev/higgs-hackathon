@@ -39,6 +39,7 @@ output_recordings/
 *.mp3
 *.wav
 transcripts/
+ref-audio\*
 
 # IDE
 .vscode/

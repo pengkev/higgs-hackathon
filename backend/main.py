@@ -23,6 +23,27 @@ load_dotenv()
 with open('prompts.json', 'r', encoding='utf-8') as f:
     PROMPTS = json.load(f)
 
+# === Voice cloning config ===
+VOICE_CLONE_WAV_PATH = os.getenv("VOICE_CLONE_WAV_PATH", "ref-audio/receptionist.wav")
+VOICE_CLONE_SPEAKER_TAG = "[SPEAKER1]"
+
+VOICE_CLONE_AUDIO_B64 = None
+VOICE_CLONE_TRANSCRIPT = (
+    "[SPEAKER1]"
+    "Hi, you've reached the office of BosonAI. "
+    )
+
+try:
+    if os.path.exists(VOICE_CLONE_WAV_PATH):
+        with open(VOICE_CLONE_WAV_PATH, "rb") as f:
+            VOICE_CLONE_AUDIO_B64 = base64.b64encode(f.read()).decode("utf-8")
+        print(f"Media WS: ✅ Loaded voice clone reference from {VOICE_CLONE_WAV_PATH}")
+    else:
+        print(f"Media WS: ⚠️ VOICE_CLONE_WAV_PATH not found at {VOICE_CLONE_WAV_PATH} - falling back to non-cloned TTS")
+except Exception as e:
+    print(f"Media WS: ⚠️ Failed to load voice clone reference: {e}")
+    VOICE_CLONE_AUDIO_B64 = None
+
 # Initialize database
 # SQLITE_URL = os.getenv("SQLITECLOUD_URL")
 # if SQLITE_URL:
@@ -48,7 +69,6 @@ END_SIL_MS = 1000      # silence threshold to end utterance (1.5 seconds - wait 
 MAX_UTT_MS = 20000     # max utterance length
 MIN_SPEECH_MS = 500    # minimum speech duration to count as valid utterance (ignore breath/noise)
 MIN_EXCHANGES_BEFORE_ACTION = 0
-VOICE = "belinda"
 
 # Echo/Delay configuration (tune these to adjust timing)
 POST_AUDIO_DELAY_SECONDS = 0.5   # Fixed delay after bot audio finishes playing before accepting user input
@@ -98,7 +118,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-API_REQUEST_TIMEOUT = 10.0  # seconds - timeout for BosonAI requests
+API_REQUEST_TIMEOUT = 30.0  # seconds - timeout for BosonAI requests
 
 # Lock to ensure sequential API calls within same conversation turn
 import asyncio
@@ -399,52 +419,117 @@ def pcm16_16k_to_mulaw8k(pcm16_16k: bytes) -> bytes:
 
 
 async def generate_speech_with_emotion(text: str, emotion: str = "neutral and professional"):
-    """Generate speech with specified emotion using the chat completions API.
-    
-    Args:
-        text: The text to convert to speech
-        emotion: The emotion to convey (e.g., "friendly and professional", "excited", "calm", "apologetic")
+    """
+    Generate speech with specified emotion using Boson voice cloning if available.
+    If VOICE_CLONE_AUDIO_B64 is not set, falls back to generic TTS.
     
     Returns:
-        Response object with PCM audio content, or None if failed
+        AudioResponse-like object with .content = raw PCM16 audio (24 kHz) or None on failure.
     """
     try:
-        # Use chat completions API with modalities for emotion control
+        # If we don't have a clone reference loaded, fall back to the old behavior
+        if not VOICE_CLONE_AUDIO_B64:
+            log("🔁 Voice clone reference not configured - using generic TTS path")
+            # Use chat completions API with modalities for emotion control
+            messages = [
+                {
+                    "role": "system",
+                    "content": f"Convert the following text into speech with a {emotion} tone."
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ]
+            
+            response = await call_bosonai(
+                "chat.completions.create",
+                model="higgs-audio-generation-Hackathon",
+                messages=messages,
+                temperature = 0.5
+            )
+            
+            if not response:
+                return None
+            
+            # Extract audio data from response
+            if hasattr(response.choices[0].message, 'audio') and response.choices[0].message.audio:
+                audio_data = response.choices[0].message.audio
+                # Decode base64 audio data
+                pcm_data = base64.b64decode(audio_data['data'])
+                
+                # Create a response object compatible with existing code
+                class AudioResponse:
+                    def __init__(self, content):
+                        self.content = content
+                
+                return AudioResponse(pcm_data)
+            else:
+                log("No audio data in response")
+                return None
+
+        # Voice-cloned path using the Boson example structure
+        system = (
+            "You are an AI assistant designed to convert text into speech.\n"
+            f"Use a {emotion} tone in your delivery.\n"
+            "If the user's message includes a [SPEAKER*] tag, do not read out the tag and "
+            "generate speech for the following text, using the specified voice.\n"
+            "If no speaker tag is present, select a suitable voice on your own.\n\n"
+            "<|scene_desc_start|>\n"
+            "Audio is recorded from a quiet room.\n"
+            "<|scene_desc_end|>"
+        )
+
         messages = [
+            {"role": "system", "content": system},
+            # Reference transcript for the cloned voice
+            {"role": "user", "content": VOICE_CLONE_TRANSCRIPT},
+            # Reference audio as assistant content
             {
-                "role": "system",
-                "content": f"Convert the following text into speech with a {emotion} tone."
+                "role": "assistant",
+                "content": [{
+                    "type": "input_audio",
+                    "input_audio": {"data": VOICE_CLONE_AUDIO_B64, "format": "wav"},
+                }],
             },
-            {
-                "role": "user",
-                "content": text
-            }
+            # Actual text we want spoken, in the same speaker's voice
+            {"role": "user", "content": f"{VOICE_CLONE_SPEAKER_TAG} {text}"},
         ]
-        
+
         response = await call_bosonai(
             "chat.completions.create",
             model="higgs-audio-generation-Hackathon",
-            messages=messages
+            messages=messages,
+            temperature=1,
+            top_p=0.95,
+            stream=False,
+            stop=["<|eot_id|>", "<|end_of_text|>", "<|audio_eos|>"],
+            extra_body={"top_k": 50},
         )
-        
+
         if not response:
+            log("No response from BosonAI for voice-cloned TTS")
             return None
-        
-        # Extract audio data from response
-        if hasattr(response.choices[0].message, 'audio') and response.choices[0].message.audio:
-            audio_data = response.choices[0].message.audio
-            # Decode base64 audio data
-            pcm_data = base64.b64decode(audio_data['data'])
-            
-            # Create a response object compatible with existing code
-            class AudioResponse:
-                def __init__(self, content):
-                    self.content = content
-            
-            return AudioResponse(pcm_data)
-        else:
-            log("No audio data in response")
+
+        # Extract audio data from response (WAV container, like in the example)
+        audio_obj = getattr(response.choices[0].message, "audio", None)
+        if not audio_obj:
+            log("No audio field in Boson response (voice-clone path)")
             return None
+
+        import io
+        wav_bytes = base64.b64decode(audio_obj["data"])
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            pcm_data = wf.readframes(wf.getnframes())
+            sr = wf.getframerate()
+            log(f"Voice-cloned audio: {len(pcm_data)} bytes at {sr} Hz")
+
+        # Wrap in AudioResponse to be compatible with the rest of your pipeline
+        class AudioResponse:
+            def __init__(self, content):
+                self.content = content
+
+        return AudioResponse(pcm_data)
             
     except Exception as e:
         log(f"Error generating speech with emotion: {e}")
